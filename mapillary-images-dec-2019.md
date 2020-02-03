@@ -2,7 +2,7 @@ All cameras used to make Mapillary images in Dec 2019
 
 | Make | Model | Number of images | Sample image
 | --- | --- | --- | --- |
-|Nokia 3.1|40|https://www.mapillary.com/app/?pKey=ZN7jZWWLe0vi-WBVemVvwg
+---|Nokia 3.1|40|https://www.mapillary.com/app/?pKey=ZN7jZWWLe0vi-WBVemVvwg
 Acer|T08|239|https://www.mapillary.com/app/?pKey=_zyYJ3wEVQA5L4RePCIrpQ
 AEE DV|AEE DV|91|https://www.mapillary.com/app/?pKey=zZg9exWGvRFeX4wWryqhOg
 AGM|A8|32|https://www.mapillary.com/app/?pKey=ykDANR24sCZYil3AZ60AvA
