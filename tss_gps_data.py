@@ -6,12 +6,13 @@ import sys
 try:
     input_ts_file = sys.argv[1]
 except:
-    print ("Usage: python tss_gps_data.py [file] [type]")
+    print ("Usage: python tss_gps_data.py file [type]")
+    exit()
 try:
     device = sys.argv[2]
 except:
     # B for Blueskysea, V for Viofo. This could be made more automatically at some point.
-    if input_ts_file.lower().endswith(".tss"):
+    if input_ts_file.lower().endswith(".tts"):
         device = 'B'
     else:
         device = 'V'
