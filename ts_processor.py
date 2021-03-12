@@ -13,22 +13,15 @@ import glob
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--input', required = True, type=str)
-parser.add_argument('--fps', default = '2', type=float)
+parser.add_argument('--sampling_interval', default = '0.5', type=float)
 parser.add_argument('--folder', default = 'output', type=str)
-parser.add_argument('--prefix', default = 'filename_', type=str)
 parser.add_argument('--timeshift', default = '0', type=float)
 args = parser.parse_args()
 print(args)
-
 input_ts_file = args.input
-
-interval = args.fps
 folder = args.folder
 timeshift = args.timeshift
-if args.prefix == "filename_":
-    prefix = input_ts_file.replace(".","_") + "_"
-else:
-    prefix = args.prefix
+
 
 
 
@@ -72,6 +65,10 @@ for input_ts_file in inputfiles:
     fps = video.get(cv2.CAP_PROP_FPS)
     length = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
     print ("FPS : {0}; LEN: {1}".format(fps,length))
+    
+    interval = int(args.sampling_interval*fps)
+    make = "unknown"
+    model = "unknown"
     packetno = 0
     locdata = {}
     prevpacket = None
@@ -90,6 +87,8 @@ for input_ts_file in inputfiles:
                 lonhem = chr(bs[158])
                 if lathem in "NS" and lonhem in "EW":
                     device = "B"
+                    make = "Blueskysea"
+                    model = "B4K"
                     print ("Autodetected as Blueskysea B4K")
             if device == 'A' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
                 bs = list(input_packet)
@@ -99,7 +98,8 @@ for input_ts_file in inputfiles:
                 if lathem in "NS" and lonhem in "EW":
                     device = "V"
                     print ("Autodetected as Viofo A119 V3")
-                
+                    make = "Viofo"
+                    model = "A119 V3"              
             if device == 'B' and prevpacket and input_packet.startswith(bytes("\x47\x03\x00", encoding="raw_unicode_escape")):
                 bs = list(input_packet)
                 hour = int.from_bytes(prevpacket[174:178], byteorder='little')
@@ -161,35 +161,41 @@ for input_ts_file in inputfiles:
         count = 0
         success,image = video.read()
         while success:
-            if framecount % int(fps/interval) == 0:
-                #interpolate time and coordinates
-                prev_dataframe = min(len(locdata)-1,float(math.trunc((framecount+timeshift*fps)/fps)))
-                
-                current_position = (framecount + timeshift*fps - prev_dataframe*fps)/fps 
-                new_ts = locdata[prev_dataframe]["ts"]+(locdata[min(len(locdata)-1,prev_dataframe+1)]["ts"]-locdata[prev_dataframe]["ts"])*current_position
-                new_lat = locdata[prev_dataframe]["lat"]+(locdata[min(len(locdata)-1,prev_dataframe+1)]["lat"]-locdata[prev_dataframe]["lat"])*current_position
-                new_lon = locdata[prev_dataframe]["lon"]+(locdata[min(len(locdata)-1,prev_dataframe+1)]["lon"]-locdata[prev_dataframe]["lon"])*current_position
-                new_bear = locdata[prev_dataframe]["bearing"]+(locdata[min(len(locdata)-1,prev_dataframe+1)]["bearing"]-locdata[prev_dataframe]["bearing"])*current_position
-                lonref, lon2 = to_gps_latlon(new_lon, ('E', 'W'))
-                latref, lat2 = to_gps_latlon(new_lat, ('N', 'S'))
-                cv2.imwrite("tmp.jpg", image)
-                e_image = Image("tmp.jpg")
-                e_image.gps_latitude = lat2
-                e_image.gps_latitude_ref = latref
-                e_image.gps_longitude  = lon2
-                e_image.gps_longitude_ref = lonref
-                e_image.gps_img_direction = new_bear
-                e_image.gps_dest_bearing = new_bear
-                e_image.make = "Potato"
-                datetime_taken = datetime.fromtimestamp(new_ts)
-                e_image.datetime_original = datetime_taken.strftime(DATETIME_STR_FORMAT)
-                
-                with open(folder+os.path.sep+prefix+"%06d.jpg" % count, 'wb') as new_image_file:
-                    new_image_file.write(e_image.get_file())
-                success,image = video.read()
-                #print('Frame: ', framecount)
-                count += 1
-            framecount += 1
+            if framecount % interval == 0:
+                try:
+                    #interpolate time and coordinates
+                    prev_dataframe = (float(math.trunc((framecount+timeshift*fps)/fps)))
+                    
+                    current_position = (framecount + timeshift*fps - prev_dataframe*fps)/fps 
+                    new_ts = locdata[prev_dataframe]["ts"]+(locdata[(prev_dataframe+1)]["ts"]-locdata[prev_dataframe]["ts"])*current_position
+                    new_lat = locdata[prev_dataframe]["lat"]+(locdata[(prev_dataframe+1)]["lat"]-locdata[prev_dataframe]["lat"])*current_position
+                    new_lon = locdata[prev_dataframe]["lon"]+(locdata[(prev_dataframe+1)]["lon"]-locdata[prev_dataframe]["lon"])*current_position
+                    new_bear = locdata[prev_dataframe]["bearing"]+(locdata[(prev_dataframe+1)]["bearing"]-locdata[prev_dataframe]["bearing"])*current_position
+                    lonref, lon2 = to_gps_latlon(new_lon, ('E', 'W'))
+                    latref, lat2 = to_gps_latlon(new_lat, ('N', 'S'))
+                    cv2.imwrite("tmp.jpg", image)
+                    e_image = Image("tmp.jpg")
+                    e_image.gps_latitude = lat2
+                    e_image.gps_latitude_ref = latref
+                    e_image.gps_longitude  = lon2
+                    e_image.gps_longitude_ref = lonref
+                    e_image.gps_img_direction = new_bear
+                    e_image.gps_dest_bearing = new_bear
+                    e_image.make = make
+                    e_image.model = model
+                    datetime_taken = datetime.fromtimestamp(new_ts)
+                    e_image.datetime_original = datetime_taken.strftime(DATETIME_STR_FORMAT)
+                    
+                    with open(folder+os.path.sep+input_ts_file.replace(".ts","_")+"%06d.jpg" % count, 'wb') as new_image_file:
+                        new_image_file.write(e_image.get_file())
+                    #print('Frame: ', framecount)
+                    count += 1
+                except:
+                    print ("No GPS data for frame %d, skipped." % framecount)
+            
+            framecount += int(fps*args.sampling_interval)
+            print('Frame: ', framecount)
+            video.set(1,framecount)
             success,image = video.read()
         video.release()
         os.unlink("tmp.jpg")
