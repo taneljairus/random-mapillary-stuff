@@ -1,5 +1,5 @@
 #For this: https://forum.mapillary.com/t/blueskysea-b4k-viofo-a119v3-and-mapillary
-#Usage: python ts_processor.py --input 20210311080720_000421.TS  --fps 2 --folder output --prefix this_video_frame_
+#Usage: python ts_processor.py --input 20210311080720_000421.TS  --sampling_interval 0.5 --folder output
 
 import struct
 import sys
@@ -122,7 +122,8 @@ for input_ts_file in inputfiles:
                 currentdata["lon"] = lon
                 currentdata["lonR"] = lonhem
                 currentdata["bearing"] = bearing
-                locdata[packetno] = currentdata
+                if active == "A":
+                    locdata[packetno] = currentdata
                 packetno += 1
                 #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
             if device == 'V' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
@@ -147,7 +148,8 @@ for input_ts_file in inputfiles:
                 currentdata["lon"] = lon
                 currentdata["lonR"] = lonhem
                 currentdata["bearing"] = bearing
-                locdata[packetno] = currentdata
+                if active == "A":
+                    locdata[packetno] = currentdata
                 packetno += 1
                 #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
             prevpacket = input_packet
@@ -194,7 +196,7 @@ for input_ts_file in inputfiles:
                     print ("No GPS data for frame %d, skipped." % framecount)
             
             framecount += int(fps*args.sampling_interval)
-            print('Frame: ', framecount)
+            #print('Frame: ', framecount)
             video.set(1,framecount)
             success,image = video.read()
         video.release()
