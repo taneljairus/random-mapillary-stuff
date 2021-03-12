@@ -16,6 +16,7 @@ parser.add_argument('--input', required = True, type=str)
 parser.add_argument('--sampling_interval', default = '0.5', type=float)
 parser.add_argument('--folder', default = 'output', type=str)
 parser.add_argument('--timeshift', default = '0', type=float)
+parser.add_argument('--bearing_modifier', default = '0', type=float) #180 if rear camera
 args = parser.parse_args()
 print(args)
 input_ts_file = args.input
@@ -172,7 +173,11 @@ for input_ts_file in inputfiles:
                     new_ts = locdata[prev_dataframe]["ts"]+(locdata[(prev_dataframe+1)]["ts"]-locdata[prev_dataframe]["ts"])*current_position
                     new_lat = locdata[prev_dataframe]["lat"]+(locdata[(prev_dataframe+1)]["lat"]-locdata[prev_dataframe]["lat"])*current_position
                     new_lon = locdata[prev_dataframe]["lon"]+(locdata[(prev_dataframe+1)]["lon"]-locdata[prev_dataframe]["lon"])*current_position
-                    new_bear = locdata[prev_dataframe]["bearing"]+(locdata[(prev_dataframe+1)]["bearing"]-locdata[prev_dataframe]["bearing"])*current_position
+                    new_bear = args.bearing_modifier + locdata[prev_dataframe]["bearing"]+(locdata[(prev_dataframe+1)]["bearing"]-locdata[prev_dataframe]["bearing"])*current_position
+                    while new_bear < 0:
+                        new_bear += 360
+                    while new_bear > 360:
+                        new_bear -= 360
                     lonref, lon2 = to_gps_latlon(new_lon, ('E', 'W'))
                     latref, lat2 = to_gps_latlon(new_lat, ('N', 'S'))
                     cv2.imwrite("tmp.jpg", image)
