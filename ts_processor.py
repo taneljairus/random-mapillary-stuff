@@ -155,11 +155,65 @@ for input_ts_file in inputfiles:
                 #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
             prevpacket = input_packet
             del currentdata
-            
+    print ("GPS data analysis ended, no of points ", len(locdata))
+    if len(locdata)<length/fps:
+        print ("Missing GPS points. Interpolating")
+        i = 0
+        while i < length/fps:
+            if i not in locdata:
+                #Find previous existing
+                prev_data = i - 1
+                next_data = i + 1
+                while prev_data not in locdata and prev_data>0:
+                    prev_data -= 1
+             
+                #Find next existing
+                while locdata[next_data] is None and next<length/fps:
+                    next_data += 1
+                if prev_data in locdata and next_data in locdata:
+                    currentdata = {}
 
+                    current_position = float(i-prev_data)/float(next_data-prev_data)
+                    currentdata["ts"] = locdata[prev_data]["ts"]+(locdata[(next_data)]["ts"]-locdata[prev_data]["ts"])*current_position
+                    currentdata["lat"] = locdata[prev_data]["lat"]+(locdata[(next_data)]["lat"]-locdata[prev_data]["lat"])*current_position
+                    currentdata["lon"] = locdata[prev_data]["lon"]+(locdata[(next_data)]["lon"]-locdata[prev_data]["lon"])*current_position
+                    currentdata["bearing"] = locdata[prev_data]["bearing"]+(locdata[(next_data)]["bearing"]-locdata[prev_data]["bearing"])*current_position
+                    locdata[i] = currentdata
+                    del currentdata
+            i=i+1
+    i=0
+    while not i in locdata:
+        i+=1  #extrapolate down
+    
+    while i > -10:
+        if not i in locdata:
+            currentdata = {}
+            
+            currentdata["ts"] = locdata[i+1]["ts"]-(locdata[(i+2)]["ts"]-locdata[i+1]["ts"])
+            currentdata["lat"] = locdata[i+1]["lat"]-(locdata[(i+2)]["lat"]-locdata[i+1]["lat"])
+            currentdata["lon"] = locdata[i+1]["lon"]-(locdata[(i+2)]["lon"]-locdata[i+1]["lon"])
+            currentdata["bearing"] = locdata[i+1]["bearing"]-(locdata[(i+2)]["bearing"]-locdata[i+1]["bearing"])
+            locdata[i] = currentdata
+            del currentdata
+        i-=1
+    i=0
+    while i in locdata:
+        i+=1
+    while i < length / fps * 1.5:
+        if not i in locdata:
+            currentdata = {}
+            
+            currentdata["ts"] = locdata[i-1]["ts"]+(locdata[(i-2)]["ts"]-locdata[i-1]["ts"])
+            currentdata["lat"] = locdata[i-1]["lat"]+(locdata[(i-2)]["lat"]-locdata[i-1]["lat"])
+            currentdata["lon"] = locdata[i-1]["lon"]+(locdata[(i-2)]["lon"]-locdata[i-1]["lon"])
+            currentdata["bearing"] = locdata[i-1]["bearing"]+(locdata[(i-2)]["bearing"]-locdata[i-1]["bearing"])
+            locdata[i] = currentdata
+            del currentdata
+        i+=1
     if len(locdata)<5:
         print ("No GPS data")
     else:
+        print ("Video extraction started")
         framecount = 0
         count = 0
         success,image = video.read()
@@ -198,7 +252,7 @@ for input_ts_file in inputfiles:
                     #print('Frame: ', framecount)
                     count += 1
                 except:
-                    print ("No GPS data for frame %d, skipped." % framecount)
+                    print ("Error processing frame %d, skipped." % framecount)
             
             framecount += int(fps*args.sampling_interval)
             #print('Frame: ', framecount)
@@ -206,3 +260,4 @@ for input_ts_file in inputfiles:
             success,image = video.read()
         video.release()
         os.unlink("tmp.jpg")
+        print (input_ts_file, " processed")
