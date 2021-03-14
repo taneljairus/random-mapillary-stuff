@@ -21,6 +21,7 @@ parser.add_argument('--bearing_modifier', default = '0', type=float) #180 if rea
 parser.add_argument('--min_coverage', default = '90', type=int) #percentage - how much video must have GPS data in order to interpolate missing
 parser.add_argument('--min_points', default = '5', type=int) #how many points to allow video extraction
 parser.add_argument('--metric_distance', default = '0', type=int) #distance between images, overrides sampling_interval. Does not work well yet.
+parser.add_argument('--csv', default = 'false', type=bool) #create csv from coordinates before and after interpolation.
 args = parser.parse_args()
 print(args)
 input_ts_file = args.input
@@ -109,6 +110,7 @@ if os.path.isdir(input_ts_file):
 for input_ts_file in inputfiles:
     device = "A"
     print (input_ts_file)
+
     video = cv2.VideoCapture(input_ts_file)
     fps = video.get(cv2.CAP_PROP_FPS)
     length = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -121,7 +123,17 @@ for input_ts_file in inputfiles:
     locdata = {}
     prevpacket = None
     with open(input_ts_file, "rb") as f:
-        
+        input_packet = f.read(188) #First packet, try to autodetect
+        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet:
+            device = "V"
+            print ("Autodetected as Viofo A119 V3")
+            make = "Viofo"
+            model = "A119 V3"   
+        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet:
+            device = "B"
+            make = "Blueskysea"
+            model = "B4K"
+            print ("Autodetected as Blueskysea B4K")    
         while True:
             currentdata = {}
             input_packet = f.read(188)
@@ -138,6 +150,7 @@ for input_ts_file in inputfiles:
                     make = "Blueskysea"
                     model = "B4K"
                     print ("Autodetected as Blueskysea B4K")
+                
             if device == 'A' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
                 bs = list(input_packet)
                 active = chr(bs[34])
@@ -211,6 +224,16 @@ for input_ts_file in inputfiles:
             prevpacket = input_packet
             del currentdata
     print ("GPS data analysis ended, no of points ", len(locdata))
+    
+    ###Logging
+    if args.csv:
+        with open(input_ts_file.split(os.path.sep)[-1].replace(".ts","_")+"pre_interp.csv", "w") as xf:
+            print ("i;lat;lon;ts;speed;bearing", file=xf)
+            for i in locdata:
+                print (i,locdata[i]["lat"],locdata[i]["lon"],locdata[i]["speed"],locdata[i]["bearing"], sep=";", file=xf)
+    
+    ###
+    
     if len(locdata)<args.min_coverage*length*0.01/fps:
         print ("Not enough GPS data for interpolation",args.min_coverage,"% needed, ",len(locdata)*100/length*fps,"% found")
     else:
@@ -226,7 +249,7 @@ for input_ts_file in inputfiles:
                         prev_data -= 1
                  
                     #Find next existing
-                    while locdata[next_data] is None and next<length/fps:
+                    while next_data not in locdata and next_data<length/fps:
                         next_data += 1
                     if prev_data in locdata and next_data in locdata:
                         currentdata = {}
@@ -248,7 +271,7 @@ for input_ts_file in inputfiles:
         while not i in locdata:
             i+=1  #extrapolate down
         
-        while i > -10:
+        while i > -5:
             if not i in locdata:
                 currentdata = {}
                 
@@ -267,7 +290,7 @@ for input_ts_file in inputfiles:
         i=0
         while i in locdata:
             i+=1
-        while i < length / fps * 1.5:
+        while i < length / fps * 1.1:
             if not i in locdata:
                 currentdata = {}
                 
@@ -283,84 +306,92 @@ for input_ts_file in inputfiles:
                 locdata[i] = currentdata
                 del currentdata
             i+=1
-i=1
-while i in locdata:
-    locdata[i]["prevdist"] = math.sqrt(pow(locdata[i-1]["mx"]-locdata[i]["mx"],2)+pow(locdata[i-1]["my"]-locdata[i]["my"],2))
-    locdata[i]["metric"] = locdata[i-1]["metric"] + locdata[i]["prevdist"]
-    i += 1
+    i=1
+    while i in locdata:
+        locdata[i]["prevdist"] = math.sqrt(pow(locdata[i-1]["mx"]-locdata[i]["mx"],2)+pow(locdata[i-1]["my"]-locdata[i]["my"],2))
+        locdata[i]["metric"] = locdata[i-1]["metric"] + locdata[i]["prevdist"]
+        i += 1
 
+    ###Logging
+    if args.csv:
+        with open(input_ts_file.split(os.path.sep)[-1].replace(".ts","_")+"post_interp.csv", "w") as xf:
+            print ("no;lat;lon;ts;speed;bearing", file=xf)
+            for i in locdata:
+                print (i,locdata[i]["lat"],locdata[i]["lon"],locdata[i]["speed"],locdata[i]["bearing"], sep=";", file=xf)
     
+    ###     
 
-if len(locdata)<args.min_points:
-    print ("Not enough GPS data for frame extraction.")
-else:
-    print ("Video extraction started")
-    framecount = 0
-    count = 0
-    meters = 0
-    success,image = video.read()
-    while success:
-         
-        try:
-            #interpolate time and coordinates
-            prev_dataframe = (float(math.trunc((framecount+timeshift*fps)/fps)))
-
-            current_position = (framecount + timeshift*fps - prev_dataframe*fps)/fps 
-            new_speed = locdata[prev_dataframe]["speed"]+(locdata[(prev_dataframe+1)]["speed"]-locdata[prev_dataframe]["speed"])*current_position
-            if new_speed >= args.min_speed or args.metric_distance > 0:
-                meter = locdata[prev_dataframe]["metric"]+(locdata[(prev_dataframe+1)]["metric"]-locdata[prev_dataframe]["metric"])*current_position
-                new_ts = locdata[prev_dataframe]["ts"]+(locdata[(prev_dataframe+1)]["ts"]-locdata[prev_dataframe]["ts"])*current_position
-                new_lat = locdata[prev_dataframe]["lat"]+(locdata[(prev_dataframe+1)]["lat"]-locdata[prev_dataframe]["lat"])*current_position
-                new_lon = locdata[prev_dataframe]["lon"]+(locdata[(prev_dataframe+1)]["lon"]-locdata[prev_dataframe]["lon"])*current_position
-                new_bear = args.bearing_modifier + locdata[prev_dataframe]["bearing"]+(locdata[(prev_dataframe+1)]["bearing"]-locdata[prev_dataframe]["bearing"])*current_position
-                while new_bear < 0:
-                    new_bear += 360
-                while new_bear > 360:
-                    new_bear -= 360
-                lonref, lon2 = to_gps_latlon(new_lon, ('E', 'W'))
-                latref, lat2 = to_gps_latlon(new_lat, ('N', 'S'))
-                cv2.imwrite("tmp.jpg", image)
-                e_image = Image("tmp.jpg")
-                e_image.gps_latitude = lat2
-                e_image.gps_latitude_ref = latref
-                e_image.gps_longitude  = lon2
-                e_image.gps_longitude_ref = lonref
-                e_image.gps_img_direction = new_bear
-                e_image.gps_dest_bearing = new_bear
-                e_image.make = make
-                e_image.model = model
-                datetime_taken = datetime.fromtimestamp(new_ts)
-                e_image.datetime_original = datetime_taken.strftime(DATETIME_STR_FORMAT)
-                
-                with open(folder+os.path.sep+input_ts_file.replace(".ts","_") + "_"+"%06d" % count + ".jpg", 'wb') as new_image_file:
-                    new_image_file.write(e_image.get_file())
-                #print('Frame: ', framecount)
-                count += 1
-        except:
-        
-            print ("Error processing frame %d, skipped." % framecount)
-        if args.metric_distance > 0:
-            meters = meters + args.metric_distance
-            i = 1
-            while i in locdata and not (meters >= locdata[i-1]["metric"] and meters<=locdata[i]["metric"]):
-                i+=1
-            if i in locdata and meters >= locdata[i-1]["metric"] and meters<=locdata[i]["metric"]:
-                try:
-                    framecount = int(i*fps + fps * float(meters-locdata[i]["metric"])/float(locdata[i]["prevdist"]))
-                except:
-                    framecount = int(i*fps)
-            else:
-                framecount = length + 1
-            
-        else:
-            framecount += int(fps*args.sampling_interval)
-        #print('Frame: ', framecount)
-        with suppress_stdout_stderr(): #Just to keep the console clear from OpenCV warning messages
-            video.set(1,framecount)
+    if len(locdata)<args.min_points:
+        print ("Not enough GPS data for frame extraction.")
+    else:
+        print ("Video extraction started")
+        framecount = 0
+        count = 0
+        meters = 0
         success,image = video.read()
-    video.release()
-    try:
-        os.unlink("tmp.jpg")
-    except:
-        pass
-    print (input_ts_file, " processed, ", count, " images extracted")
+        while success:
+             
+            if True:
+                #interpolate time and coordinates
+                prev_dataframe = (float(math.trunc(float(framecount+timeshift*fps)/fps)))
+                while prev_dataframe+1 not in locdata and prev_dataframe >= length/fps - 2:
+                    prev_dataframe -= 1
+                if prev_dataframe in locdata and prev_dataframe + 1 in locdata:
+                    current_position = (framecount + timeshift*fps - prev_dataframe*fps)/fps 
+                    new_speed = locdata[prev_dataframe]["speed"]+(locdata[(prev_dataframe+1)]["speed"]-locdata[prev_dataframe]["speed"])*current_position
+                    if new_speed >= args.min_speed or args.metric_distance > 0:
+                        meter = locdata[prev_dataframe]["metric"]+(locdata[(prev_dataframe+1)]["metric"]-locdata[prev_dataframe]["metric"])*current_position
+                        new_ts = locdata[prev_dataframe]["ts"]+(locdata[(prev_dataframe+1)]["ts"]-locdata[prev_dataframe]["ts"])*current_position
+                        new_lat = locdata[prev_dataframe]["lat"]+(locdata[(prev_dataframe+1)]["lat"]-locdata[prev_dataframe]["lat"])*current_position
+                        new_lon = locdata[prev_dataframe]["lon"]+(locdata[(prev_dataframe+1)]["lon"]-locdata[prev_dataframe]["lon"])*current_position
+                        new_bear = args.bearing_modifier + locdata[prev_dataframe]["bearing"]+(locdata[(prev_dataframe+1)]["bearing"]-locdata[prev_dataframe]["bearing"])*current_position
+                        while new_bear < 0:
+                            new_bear += 360
+                        while new_bear > 360:
+                            new_bear -= 360
+                        lonref, lon2 = to_gps_latlon(new_lon, ('E', 'W'))
+                        latref, lat2 = to_gps_latlon(new_lat, ('N', 'S'))
+                        cv2.imwrite("tmp.jpg", image)
+                        e_image = Image("tmp.jpg")
+                        e_image.gps_latitude = lat2
+                        e_image.gps_latitude_ref = latref
+                        e_image.gps_longitude  = lon2
+                        e_image.gps_longitude_ref = lonref
+                        e_image.gps_img_direction = new_bear
+                        e_image.gps_dest_bearing = new_bear
+                        e_image.make = make
+                        e_image.model = model
+                        datetime_taken = datetime.fromtimestamp(new_ts)
+                        e_image.datetime_original = datetime_taken.strftime(DATETIME_STR_FORMAT)
+                        
+                        with open(folder+os.path.sep+input_ts_file.split(os.path.sep)[-1].replace(".ts","_") + "_"+"%06d" % count + ".jpg", 'wb') as new_image_file:
+                            new_image_file.write(e_image.get_file())
+                        #print('Frame: ', framecount)
+                        count += 1
+                else:
+                    print ("No valid GPS for frame %d, skipped." % framecount)
+            if args.metric_distance > 0:
+                meters = meters + args.metric_distance
+                i = 1
+                while i in locdata and not (meters >= locdata[i-1]["metric"] and meters<=locdata[i]["metric"]):
+                    i+=1
+                if i in locdata and meters >= locdata[i-1]["metric"] and meters<=locdata[i]["metric"]:
+                    try:
+                        framecount = int(i*fps + fps * float(meters-locdata[i]["metric"])/float(locdata[i]["prevdist"]))
+                    except:
+                        framecount = int(i*fps)
+                else:
+                    framecount = length + 1
+                
+            else:
+                framecount += int(fps*args.sampling_interval)
+            #print('Frame: ', framecount)
+            with suppress_stdout_stderr(): #Just to keep the console clear from OpenCV warning messages
+                video.set(1,framecount)
+            success,image = video.read()
+        video.release()
+        try:
+            os.unlink("tmp.jpg")
+        except:
+            pass
+        print (input_ts_file, " processed, ", count, " images extracted")
