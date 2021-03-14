@@ -124,12 +124,12 @@ for input_ts_file in inputfiles:
     prevpacket = None
     with open(input_ts_file, "rb") as f:
         input_packet = f.read(188) #First packet, try to autodetect
-        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet:
+        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:10]:
             device = "V"
             print ("Autodetected as Viofo A119 V3")
             make = "Viofo"
             model = "A119 V3"   
-        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet:
+        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:10]:
             device = "B"
             make = "Blueskysea"
             model = "B4K"
@@ -308,7 +308,7 @@ for input_ts_file in inputfiles:
             i+=1
     i=1
     while i in locdata:
-        locdata[i]["prevdist"] = math.sqrt(pow(locdata[i-1]["mx"]-locdata[i]["mx"],2)+pow(locdata[i-1]["my"]-locdata[i]["my"],2))
+        locdata[i]["prevdist"] = math.cos(math.radians(locdata[i]["lat"])) * math.sqrt(pow(locdata[i-1]["mx"]-locdata[i]["mx"],2)+pow(locdata[i-1]["my"]-locdata[i]["my"],2))
         locdata[i]["metric"] = locdata[i-1]["metric"] + locdata[i]["prevdist"]
         i += 1
 
@@ -392,6 +392,7 @@ for input_ts_file in inputfiles:
         video.release()
         try:
             os.unlink("tmp.jpg")
+            print (input_ts_file, " processed, ", count, " images extracted")
         except:
             pass
-        print (input_ts_file, " processed, ", count, " images extracted")
+        
