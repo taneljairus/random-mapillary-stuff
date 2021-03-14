@@ -21,7 +21,7 @@ parser.add_argument('--bearing_modifier', default = '0', type=float) #180 if rea
 parser.add_argument('--min_coverage', default = '90', type=int) #percentage - how much video must have GPS data in order to interpolate missing
 parser.add_argument('--min_points', default = '5', type=int) #how many points to allow video extraction
 parser.add_argument('--metric_distance', default = '0', type=int) #distance between images, overrides sampling_interval. Does not work well yet.
-parser.add_argument('--csv', default = 'false', type=bool) #create csv from coordinates before and after interpolation.
+parser.add_argument('--csv', default = '0', type=int) #create csv from coordinates before and after interpolation.
 args = parser.parse_args()
 print(args)
 input_ts_file = args.input
@@ -124,16 +124,16 @@ for input_ts_file in inputfiles:
     prevpacket = None
     with open(input_ts_file, "rb") as f:
         input_packet = f.read(188) #First packet, try to autodetect
-        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:10]:
+        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:20]:
             device = "V"
-            print ("Autodetected as Viofo A119 V3")
+            print ("Autodetected as Viofo A119 V3.")
             make = "Viofo"
             model = "A119 V3"   
-        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:10]:
+        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:20]:
             device = "B"
             make = "Blueskysea"
             model = "B4K"
-            print ("Autodetected as Blueskysea B4K")    
+            print ("Autodetected as Blueskysea B4K.")    
         while True:
             currentdata = {}
             input_packet = f.read(188)
@@ -226,7 +226,7 @@ for input_ts_file in inputfiles:
     print ("GPS data analysis ended, no of points ", len(locdata))
     
     ###Logging
-    if args.csv:
+    if args.csv == 1:
         with open(input_ts_file.split(os.path.sep)[-1].replace(".ts","_")+"pre_interp.csv", "w") as xf:
             print ("i;lat;lon;ts;speed;bearing", file=xf)
             for i in locdata:
@@ -313,7 +313,7 @@ for input_ts_file in inputfiles:
         i += 1
 
     ###Logging
-    if args.csv:
+    if args.csv == 1:
         with open(input_ts_file.split(os.path.sep)[-1].replace(".ts","_")+"post_interp.csv", "w") as xf:
             print ("no;lat;lon;ts;speed;bearing", file=xf)
             for i in locdata:
@@ -369,7 +369,10 @@ for input_ts_file in inputfiles:
                         #print('Frame: ', framecount)
                         count += 1
                 else:
-                    print ("No valid GPS for frame %d, skipped." % framecount)
+                    try:
+                        print ("No valid GPS for frame %d, skipped." % framecount)
+                    except:
+                        pass
             if args.metric_distance > 0:
                 meters = meters + args.metric_distance
                 i = 1
