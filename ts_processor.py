@@ -363,8 +363,8 @@ for input_ts_file in inputfiles:
                         if args.mask:
                             image = cv2.bitwise_and(image,image,mask = mask)
                         if args.crop_top + args.crop_bottom + args.crop_left + args.crop_right > 0:
-                            width, height, channels = image.shape
-                            image = image[args.crop_left : width - args.crop_right, args.crop_top : height - args.crop_bottom]
+                            height, width, channels = image.shape
+                            image = image[args.crop_top : height - args.crop_bottom,args.crop_left : width - args.crop_right]
                         cv2.imwrite("tmp.jpg", image)
                         e_image = Image("tmp.jpg")
                         e_image.gps_latitude = lat2
