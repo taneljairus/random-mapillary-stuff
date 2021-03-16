@@ -20,15 +20,22 @@ parser.add_argument('--min_speed', default = '-1', type=float) #minimum speed in
 parser.add_argument('--bearing_modifier', default = '0', type=float) #180 if rear camera
 parser.add_argument('--min_coverage', default = '90', type=int) #percentage - how much video must have GPS data in order to interpolate missing
 parser.add_argument('--min_points', default = '5', type=int) #how many points to allow video extraction
-parser.add_argument('--metric_distance', default = '0', type=int) #distance between images, overrides sampling_interval. Does not work well yet.
+parser.add_argument('--metric_distance', default = '0', type=int) #distance between images, overrides sampling_interval. 
 parser.add_argument('--csv', default = '0', type=int) #create csv from coordinates before and after interpolation.
+parser.add_argument('--device_override', default = '', type=str) #force treatment as specific device, B for B4k, V for Viofo
+parser.add_argument('--mask', type=str) #masking image, must be same dimensionally as video
+parser.add_argument('--crop_left', default = '0', type=int) #number of pixels to crop from left
+parser.add_argument('--crop_right', default = '0', type=int) #number of pixels to crop from right
+parser.add_argument('--crop_top', default = '0', type=int) #number of pixels to crop from top
+parser.add_argument('--crop_bottom', default = '0', type=int) #number of pixels to crop from bottom
 args = parser.parse_args()
 print(args)
 input_ts_file = args.input
 folder = args.folder
 timeshift = args.timeshift
 
-
+if args.mask:
+    mask = cv2.imread(args.mask,0)
 # Define a context manager to suppress stdout and stderr.
 class suppress_stdout_stderr(object): #from here: https://stackoverflow.com/questions/11130156/suppress-stdout-stderr-print-from-python-functions
     '''
@@ -117,6 +124,8 @@ for input_ts_file in inputfiles:
     print ("FPS : {0}; LEN: {1}".format(fps,length))
     
     interval = int(args.sampling_interval*fps)
+    if interval == 0:
+        interval = 1
     make = "unknown"
     model = "unknown"
     packetno = 0
@@ -124,16 +133,16 @@ for input_ts_file in inputfiles:
     prevpacket = None
     with open(input_ts_file, "rb") as f:
         input_packet = f.read(188) #First packet, try to autodetect
-        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:20]:
+        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "V":
             device = "V"
-            print ("Autodetected as Viofo A119 V3.")
+            print ("Viofo A119 V3")
             make = "Viofo"
             model = "A119 V3"   
-        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:20]:
+        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "B":
             device = "B"
             make = "Blueskysea"
             model = "B4K"
-            print ("Autodetected as Blueskysea B4K.")    
+            print ("Blueskysea B4K")    
         while True:
             currentdata = {}
             input_packet = f.read(188)
@@ -330,7 +339,7 @@ for input_ts_file in inputfiles:
         meters = 0
         success,image = video.read()
         while success:
-             
+
             if True:
                 #interpolate time and coordinates
                 prev_dataframe = (float(math.trunc(float(framecount+timeshift*fps)/fps)))
@@ -351,6 +360,11 @@ for input_ts_file in inputfiles:
                             new_bear -= 360
                         lonref, lon2 = to_gps_latlon(new_lon, ('E', 'W'))
                         latref, lat2 = to_gps_latlon(new_lat, ('N', 'S'))
+                        if args.mask:
+                            image = cv2.bitwise_and(image,image,mask = mask)
+                        if args.crop_top + args.crop_bottom + args.crop_left + args.crop_right > 0:
+                            height, width, channels = image.shape
+                            image = image[args.crop_left : width - args.crop_right, args.crop_top : height - args.crop_bottom]
                         cv2.imwrite("tmp.jpg", image)
                         e_image = Image("tmp.jpg")
                         e_image.gps_latitude = lat2
