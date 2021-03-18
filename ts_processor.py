@@ -377,7 +377,7 @@ for input_ts_file in inputfiles:
                         e_image.gps_dest_bearing = new_bear
                         e_image.make = make
                         e_image.model = model
-                        datetime_taken = datetime.fromtimestamp(new_ts+timezone*3600)
+                        datetime_taken = datetime.fromtimestamp(new_ts+args.timezone*3600)
                         e_image.datetime_original = datetime_taken.strftime(DATETIME_STR_FORMAT)
                         
                         with open(folder+os.path.sep+input_ts_file.split(os.path.sep)[-1].replace(".ts","_") + "_"+"%06d" % count + ".jpg", 'wb') as new_image_file:
