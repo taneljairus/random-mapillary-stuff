@@ -16,6 +16,7 @@ parser.add_argument('--input', required = True, type=str) #input file or folder
 parser.add_argument('--sampling_interval', default = '0.5', type=float) #distance between images in seconds.
 parser.add_argument('--folder', default = 'output', type=str) #output folder, will be created if not exists
 parser.add_argument('--timeshift', default = '0', type=float) #time shift in seconds, if the gps and video seem out of sync
+parser.add_argument('--timezone', default = '0', type=float) #timezone difference in hours. Depends on video source, some provide GMT, others local
 parser.add_argument('--min_speed', default = '-1', type=float) #minimum speed in m/s to filter out stops
 parser.add_argument('--bearing_modifier', default = '0', type=float) #180 if rear camera
 parser.add_argument('--min_coverage', default = '90', type=int) #percentage - how much video must have GPS data in order to interpolate missing
@@ -335,6 +336,7 @@ for input_ts_file in inputfiles:
     else:
         print ("Video extraction started")
         framecount = 0
+        errormessage = 0
         count = 0
         meters = 0
         success,image = video.read()
@@ -375,7 +377,7 @@ for input_ts_file in inputfiles:
                         e_image.gps_dest_bearing = new_bear
                         e_image.make = make
                         e_image.model = model
-                        datetime_taken = datetime.fromtimestamp(new_ts)
+                        datetime_taken = datetime.fromtimestamp(new_ts+timezone*3600)
                         e_image.datetime_original = datetime_taken.strftime(DATETIME_STR_FORMAT)
                         
                         with open(folder+os.path.sep+input_ts_file.split(os.path.sep)[-1].replace(".ts","_") + "_"+"%06d" % count + ".jpg", 'wb') as new_image_file:
@@ -383,10 +385,10 @@ for input_ts_file in inputfiles:
                         #print('Frame: ', framecount)
                         count += 1
                 else:
-                    try:
-                        print ("No valid GPS for frame %d, skipped." % framecount)
-                    except:
-                        pass
+                    if errormessage == 0:
+                        print ("No valid GPS for frame %d, this frame and others will be skipped." % framecount)
+                        errormessage = 1
+
             if args.metric_distance > 0:
                 meters = meters + args.metric_distance
                 i = 1
