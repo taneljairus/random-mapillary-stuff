@@ -90,8 +90,8 @@ def to_gps_latlon(v, refs):
 
 
 def lonlat_metric(xlon, xlat):
-    mx = lon * (2 * math.pi * 6378137 / 2.0) / 180.0
-    my = math.log( math.tan((90 + lat) * math.pi / 360.0 )) / (math.pi / 180.0)
+    mx = xlon * (2 * math.pi * 6378137 / 2.0) / 180.0
+    my = math.log( math.tan((90 + xlat) * math.pi / 360.0 )) / (math.pi / 180.0)
 
     my = my * (2 * math.pi * 6378137 / 2.0) / 180.0
     return mx, my
@@ -104,6 +104,155 @@ def metric_lonlat(xmx, ymy):
     xlat = 180 / math.pi * (2 * math.atan( math.exp( lat * math.pi / 180.0)) - math.pi / 2.0)
     return xlon, xlat
 
+def get_atom_info(eight_bytes): #From here: https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
+    """ reads atom type from the given 4Bytes with some minimal sanity checks """
+    try:
+        atom_size, atom_type = struct.unpack('>I4s', eight_bytes)
+    except struct.error:
+        return 0, ''
+    try:
+        a_t = atom_type.decode()
+    except UnicodeDecodeError:
+        a_t = 'UNKNOWN'
+    return int(atom_size), a_t
+    
+def get_gps_atom_info(eight_bytes): #From here: https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
+    """ get atom position and size from the given 8Byte header """
+    atom_pos, atom_size = struct.unpack('>II', eight_bytes)
+    return int(atom_pos), int(atom_size)
+
+def get_gps_offset(data): #From here: https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
+    """ finds gps payload position within the data backet """
+    pointer = len(data) - 20 #start at the end with 20 bytes allowed for trailing data
+    beginning = 0
+    offset = beginning
+    while pointer > beginning:
+        active, lon_hemi, lat_hemi = struct.unpack_from('<sss', data, pointer)
+        try:
+            active = active.decode()
+            lon_hemi = lon_hemi.decode()
+            lat_hemi = lat_hemi.decode()
+        except UnicodeDecodeError:
+            pass
+        if active == 'A' and lon_hemi in ['N', 'S'] and lat_hemi in ['E', 'W']:
+            #the A{N,S}{E,W} is 24 bytes away from the beginning of the data packet
+            offset = pointer - 24
+            break
+        pointer -= 1
+    else:
+        return -1
+    return offset
+
+def get_gps_atom(gps_atom_info, in_fh): #From here: https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
+    """ gets payload from a 'free' atom type and checks if it is there is a 'GPS ' payload """
+    atom_pos, atom_size = gps_atom_info
+    if atom_size == 0 or atom_pos == 0:
+        return None
+    in_fh.seek(atom_pos)
+    data = in_fh.read(atom_size)
+    expected_type = 'free'
+    expected_magic = 'GPS '
+    atom_size1, atom_type, magic = struct.unpack_from('>I4s4s', data)
+    try:
+        atom_type = atom_type.decode()
+        magic = magic.decode()
+        #sanity:
+        if atom_size != atom_size1 or atom_type != expected_type or magic != expected_magic:
+            print("Error! skipping atom at %x"
+                  "(expected size:%d, actual size:%d, expected type:%s, "
+                  "actual type:%s, expected magic:%s, actual maigc:%s)!"
+                  % (int(atom_pos), atom_size, atom_size1,
+                     expected_type, atom_type, expected_magic, magic))
+            return None
+    except UnicodeDecodeError as error:
+        print("Skipping: garbage atom type or magic. Error: %s." % str(error))
+        return None
+
+    currentdata, active = get_gps_data(data[12:])
+    return currentdata, active
+
+def parse_moov(in_fh): #From here: https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
+    """ crude MP4/MOV (moov) parser """
+    locdata = {}
+    offset = 0
+    is_moov = False
+    while True:
+        atom_size, atom_type = get_atom_info(in_fh.read(8))
+        if atom_size == 0:
+            break
+
+        if atom_type == 'moov':
+            print("Found moov atom...")
+            is_moov = True
+            sub_offset = offset + 8
+            while sub_offset < (offset + atom_size):
+                sub_atom_size, sub_atom_type = get_atom_info(in_fh.read(8))
+
+                if str(sub_atom_type) == 'gps ':
+                    print("Found gps chunk descriptor atom...")
+                    gps_offset = 16 + sub_offset # +16 = skip headers
+                    in_fh.seek(gps_offset, 0)
+                    packetno = 0
+                    while gps_offset < (sub_offset + sub_atom_size):
+                        currentdata, active = get_gps_atom(get_gps_atom_info(in_fh.read(8)), in_fh)
+                        if active == "A":
+                            locdata[packetno] = currentdata
+                        packetno += 1
+                        gps_offset += 8
+                        in_fh.seek(gps_offset, 0)
+
+                sub_offset += sub_atom_size
+                in_fh.seek(sub_offset, 0)
+
+        offset += atom_size
+        in_fh.seek(offset, 0)
+    return locdata, is_moov
+
+def get_gps_data(data): #From here: https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
+    """ gets gps data from a trimmed packet payload """   
+    offset = get_gps_offset(data)
+    currentdata = {}
+    if offset < 0:
+        # gps payload not found.
+        return None
+    else:
+        hour = int.from_bytes(data[4:8], byteorder='little')
+        minute = int.from_bytes(data[8:12], byteorder='little')
+        second = int.from_bytes(data[12:16], byteorder='little')
+        year = int.from_bytes(data[16:20], byteorder='little')
+        month = int.from_bytes(data[20:24], byteorder='little')
+        day = int.from_bytes(data[24:28], byteorder='little')
+        time = "%s-%s-%sT%s:%s:%sZ" % (year+2000,month,day,hour,minute,second) 
+        active = chr(data[28])
+        lathem = chr(data[29])
+        lonhem = chr(data[30])
+        lat = fix_coordinates(lathem,struct.unpack('<f', data[32:36]))
+        lon = fix_coordinates(lonhem,struct.unpack('<f', data[36:40]))
+        speed_knots, = struct.unpack('<f', data[40:44])
+        speed = speed_knots * 1.6 / 3.6
+        bearing, = struct.unpack('<f', data[44:48])
+        currentdata["ts"] = datetime(year=2000+year, month=month, day=day, hour=hour, minute=minute, second=second).replace(tzinfo=timezone.utc).timestamp()
+        currentdata["lat"] = lat
+        currentdata["latR"] = lathem
+        currentdata["lon"] = lon
+        currentdata["lonR"] = lonhem
+        currentdata["bearing"] = bearing
+        currentdata["speed"] = speed
+        currentdata["mx"],currentdata["my"] = lonlat_metric(lon,lat)
+        currentdata["metric"] = 0
+        currentdata["prevdist"] = 0
+    return currentdata, active
+
+
+def process_file(in_file): #From here: https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
+    """ process input file, looks for either MP4 or TS file signatures """
+    print("Processing file '%s'..." % in_file)
+    with open(in_file, "rb") as in_fh:
+        locdata, is_moov = parse_moov(in_fh)
+        if not is_moov:
+            print("File %s is not a MP4/MOV file..." % in_file)
+    return locdata
+
 try:
     os.mkdir(folder)
 except:
@@ -112,127 +261,136 @@ except:
 if os.path.isfile(input_ts_file):
     inputfiles = [input_ts_file]
 if os.path.isdir(input_ts_file):
-    inputfiles = glob.glob(input_ts_file + os.path.sep + '*.ts')
+    types = ('*.ts', '*.mp4') # the tuple of file types
+    inputfiles = []
+    for files in types:
+        inputfiles.extend(glob.glob(input_ts_file + os.path.sep + files))
    
    
 for input_ts_file in inputfiles:
-    device = "A"
-    print (input_ts_file)
 
     video = cv2.VideoCapture(input_ts_file)
     fps = video.get(cv2.CAP_PROP_FPS)
     length = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
     print ("FPS : {0}; LEN: {1}".format(fps,length))
-    
     interval = int(args.sampling_interval*fps)
     if interval == 0:
         interval = 1
-    make = "unknown"
-    model = "unknown"
-    packetno = 0
-    locdata = {}
-    prevpacket = None
-    with open(input_ts_file, "rb") as f:
-        input_packet = f.read(188) #First packet, try to autodetect
-        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "V":
-            device = "V"
-            print ("Viofo A119 V3")
-            make = "Viofo"
-            model = "A119 V3"   
-        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "B":
-            device = "B"
-            make = "Blueskysea"
-            model = "B4K"
-            print ("Blueskysea B4K")    
-        while True:
-            currentdata = {}
-            input_packet = f.read(188)
-            if not input_packet:
-                break
-            #Autodetect camera type
-            if device == 'A' and input_packet.startswith(bytes("\x47\x03\x00", encoding="raw_unicode_escape")):
-                bs = list(input_packet)
-                active = chr(bs[156])
-                lathem = chr(bs[157])
-                lonhem = chr(bs[158])
-                if lathem in "NS" and lonhem in "EW":
-                    device = "B"
-                    make = "Blueskysea"
-                    model = "B4K"
-                    print ("Autodetected as Blueskysea B4K")
-                
-            if device == 'A' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
-                bs = list(input_packet)
-                active = chr(bs[34])
-                lathem = chr(bs[35])
-                lonhem = chr(bs[36])            
-                if lathem in "NS" and lonhem in "EW":
-                    device = "V"
-                    print ("Autodetected as Viofo A119 V3")
-                    make = "Viofo"
-                    model = "A119 V3"              
-            if device == 'B' and prevpacket and input_packet.startswith(bytes("\x47\x03\x00", encoding="raw_unicode_escape")):
-                bs = list(input_packet)
-                hour = int.from_bytes(prevpacket[174:178], byteorder='little')
-                minute = int.from_bytes(prevpacket[178:182], byteorder='little')
-                second = int.from_bytes(prevpacket[182:186], byteorder='little')
-                year = int.from_bytes(prevpacket[186:188] + input_packet[146:148], byteorder='little')
-                month = int.from_bytes(input_packet[148:152], byteorder='little')
-                day = int.from_bytes(input_packet[152:156], byteorder='little')
-                active = chr(bs[156])
-                lathem = chr(bs[157])
-                lonhem = chr(bs[158])
-                lat = fix_coordinates(lathem,struct.unpack('<f', input_packet[160:164]))
-                lon = fix_coordinates(lonhem,struct.unpack('<f', input_packet[164:168]))
-                speed_knots, = struct.unpack('<f', input_packet[168:172])
-                speed = speed_knots * 1.6 / 3.6
-                bearing, = struct.unpack('<f', input_packet[172:176])
-                currentdata["ts"] = datetime(year=2000+year, month=month, day=day, hour=hour, minute=minute, second=second).replace(tzinfo=timezone.utc).timestamp()
-                currentdata["lat"] = lat
-                currentdata["latR"] = lathem
-                currentdata["lon"] = lon
-                currentdata["lonR"] = lonhem
-                currentdata["bearing"] = bearing
-                currentdata["speed"] = speed
-                currentdata["mx"],currentdata["my"] = lonlat_metric(lon,lat)
-                currentdata["metric"] = 0
-                currentdata["prevdist"] = 0
-                if active == "A":
-                    locdata[packetno] = currentdata
-                packetno += 1
-                #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
-            if device == 'V' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
-                bs = list(input_packet)
-                hour = int.from_bytes(input_packet[10:14], byteorder='little')
-                minute = int.from_bytes(input_packet[14:18], byteorder='little')
-                second = int.from_bytes(input_packet[18:22], byteorder='little')
-                year = int.from_bytes(input_packet[22:26], byteorder='little')
-                month = int.from_bytes(input_packet[26:30], byteorder='little')
-                day = int.from_bytes(input_packet[30:34], byteorder='little')
-                active = chr(bs[34])
-                lathem = chr(bs[35])
-                lonhem = chr(bs[36])
-                lat = fix_coordinates(lathem,struct.unpack('<f', input_packet[38:42]))
-                lon = fix_coordinates(lonhem,struct.unpack('<f', input_packet[42:46]))
-                speed_knots, = struct.unpack('<f', input_packet[46:50])
-                speed = speed_knots * 1.6 / 3.6
-                bearing, = struct.unpack('<f', input_packet[50:54])
-                currentdata["ts"] = datetime(year=2000+year, month=month, day=day, hour=hour, minute=minute, second=second).replace(tzinfo=timezone.utc).timestamp()
-                currentdata["lat"] = lat
-                currentdata["latR"] = lathem
-                currentdata["lon"] = lon
-                currentdata["lonR"] = lonhem
-                currentdata["bearing"] = bearing
-                currentdata["speed"] = speed
-                currentdata["mx"],currentdata["my"] = lonlat_metric(lon,lat)
-                currentdata["metric"] = 0
-                currentdata["prevdist"] = 0
-                if active == "A":
-                    locdata[packetno] = currentdata
-                packetno += 1
-                #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
-            prevpacket = input_packet
-            del currentdata
+    
+    if input_ts_file.lower().endswith(".mp4"):
+        make = "Viofo"
+        model = "A119 V3"
+        locdata = process_file(input_ts_file)
+    
+    if input_ts_file.lower().endswith(".ts"):
+        device = "A"
+        print (input_ts_file)
+        make = "unknown"
+        model = "unknown"
+        packetno = 0
+        locdata = {}
+        prevpacket = None
+        with open(input_ts_file, "rb") as f:
+            input_packet = f.read(188) #First packet, try to autodetect
+            if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "V":
+                device = "V"
+                print ("Viofo A119 V3")
+                make = "Viofo"
+                model = "A119 V3"   
+            if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "B":
+                device = "B"
+                make = "Blueskysea"
+                model = "B4K"
+                print ("Blueskysea B4K")    
+            while True:
+                currentdata = {}
+                input_packet = f.read(188)
+                if not input_packet:
+                    break
+                #Autodetect camera type
+                if device == 'A' and input_packet.startswith(bytes("\x47\x03\x00", encoding="raw_unicode_escape")):
+                    bs = list(input_packet)
+                    active = chr(bs[156])
+                    lathem = chr(bs[157])
+                    lonhem = chr(bs[158])
+                    if lathem in "NS" and lonhem in "EW":
+                        device = "B"
+                        make = "Blueskysea"
+                        model = "B4K"
+                        print ("Autodetected as Blueskysea B4K")
+
+                if device == 'A' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
+                    bs = list(input_packet)
+                    active = chr(bs[34])
+                    lathem = chr(bs[35])
+                    lonhem = chr(bs[36])            
+                    if lathem in "NS" and lonhem in "EW":
+                        device = "V"
+                        print ("Autodetected as Viofo A119 V3")
+                        make = "Viofo"
+                        model = "A119 V3"              
+                if device == 'B' and prevpacket and input_packet.startswith(bytes("\x47\x03\x00", encoding="raw_unicode_escape")):
+                    bs = list(input_packet)
+                    hour = int.from_bytes(prevpacket[174:178], byteorder='little')
+                    minute = int.from_bytes(prevpacket[178:182], byteorder='little')
+                    second = int.from_bytes(prevpacket[182:186], byteorder='little')
+                    year = int.from_bytes(prevpacket[186:188] + input_packet[146:148], byteorder='little')
+                    month = int.from_bytes(input_packet[148:152], byteorder='little')
+                    day = int.from_bytes(input_packet[152:156], byteorder='little')
+                    active = chr(bs[156])
+                    lathem = chr(bs[157])
+                    lonhem = chr(bs[158])
+                    lat = fix_coordinates(lathem,struct.unpack('<f', input_packet[160:164]))
+                    lon = fix_coordinates(lonhem,struct.unpack('<f', input_packet[164:168]))
+                    speed_knots, = struct.unpack('<f', input_packet[168:172])
+                    speed = speed_knots * 1.6 / 3.6
+                    bearing, = struct.unpack('<f', input_packet[172:176])
+                    currentdata["ts"] = datetime(year=2000+year, month=month, day=day, hour=hour, minute=minute, second=second).replace(tzinfo=timezone.utc).timestamp()
+                    currentdata["lat"] = lat
+                    currentdata["latR"] = lathem
+                    currentdata["lon"] = lon
+                    currentdata["lonR"] = lonhem
+                    currentdata["bearing"] = bearing
+                    currentdata["speed"] = speed
+                    currentdata["mx"],currentdata["my"] = lonlat_metric(lon,lat)
+                    currentdata["metric"] = 0
+                    currentdata["prevdist"] = 0
+                    if active == "A":
+                        locdata[packetno] = currentdata
+                    packetno += 1
+                    #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
+                if device == 'V' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
+                    bs = list(input_packet)
+                    hour = int.from_bytes(input_packet[10:14], byteorder='little')
+                    minute = int.from_bytes(input_packet[14:18], byteorder='little')
+                    second = int.from_bytes(input_packet[18:22], byteorder='little')
+                    year = int.from_bytes(input_packet[22:26], byteorder='little')
+                    month = int.from_bytes(input_packet[26:30], byteorder='little')
+                    day = int.from_bytes(input_packet[30:34], byteorder='little')
+                    active = chr(bs[34])
+                    lathem = chr(bs[35])
+                    lonhem = chr(bs[36])
+                    lat = fix_coordinates(lathem,struct.unpack('<f', input_packet[38:42]))
+                    lon = fix_coordinates(lonhem,struct.unpack('<f', input_packet[42:46]))
+                    speed_knots, = struct.unpack('<f', input_packet[46:50])
+                    speed = speed_knots * 1.6 / 3.6
+                    bearing, = struct.unpack('<f', input_packet[50:54])
+                    currentdata["ts"] = datetime(year=2000+year, month=month, day=day, hour=hour, minute=minute, second=second).replace(tzinfo=timezone.utc).timestamp()
+                    currentdata["lat"] = lat
+                    currentdata["latR"] = lathem
+                    currentdata["lon"] = lon
+                    currentdata["lonR"] = lonhem
+                    currentdata["bearing"] = bearing
+                    currentdata["speed"] = speed
+                    currentdata["mx"],currentdata["my"] = lonlat_metric(lon,lat)
+                    currentdata["metric"] = 0
+                    currentdata["prevdist"] = 0
+                    if active == "A":
+                        locdata[packetno] = currentdata
+                    packetno += 1
+                    #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
+                prevpacket = input_packet
+                del currentdata
     print ("GPS data analysis ended, no of points ", len(locdata))
     
     ###Logging
