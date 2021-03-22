@@ -258,15 +258,18 @@ try:
 except:
     pass
 
+inputfiles = []
 if os.path.isfile(input_ts_file):
     inputfiles = [input_ts_file]
 if os.path.isdir(input_ts_file):
     types = ('*.ts', '*.mp4') # the tuple of file types
-    inputfiles = []
     for files in types:
         inputfiles.extend(glob.glob(input_ts_file + os.path.sep + files))
    
-   
+if not inputfiles:
+    print("Input file(s) not found")
+    quit()
+    
 for input_ts_file in inputfiles:
 
     video = cv2.VideoCapture(input_ts_file)
