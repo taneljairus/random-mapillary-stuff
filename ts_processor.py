@@ -10,6 +10,9 @@ import argparse
 import math
 import os
 import glob
+import io
+import re
+from pymp4.parser import Box
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--input', required = True, type=str) #input file or folder
@@ -23,6 +26,7 @@ parser.add_argument('--min_coverage', default = '90', type=int) #percentage - ho
 parser.add_argument('--min_points', default = '5', type=int) #how many points to allow video extraction
 parser.add_argument('--metric_distance', default = '0', type=int) #distance between images, overrides sampling_interval. 
 parser.add_argument('--csv', default = '0', type=int) #create csv from coordinates before and after interpolation.
+parser.add_argument('--suppress_cv2_warnings', default = '1', type=int) #If disabled, will show lot of harmless warnings in console. Known to cause issues on Windows.
 parser.add_argument('--device_override', default = '', type=str) #force treatment as specific device, B for B4k, V for Viofo
 parser.add_argument('--mask', type=str) #masking image, must be same dimensionally as video
 parser.add_argument('--crop_left', default = '0', type=int) #number of pixels to crop from left
@@ -90,8 +94,8 @@ def to_gps_latlon(v, refs):
 
 
 def lonlat_metric(xlon, xlat):
-    mx = lon * (2 * math.pi * 6378137 / 2.0) / 180.0
-    my = math.log( math.tan((90 + lat) * math.pi / 360.0 )) / (math.pi / 180.0)
+    mx = xlon * (2 * math.pi * 6378137 / 2.0) / 180.0
+    my = math.log( math.tan((90 + xlat) * math.pi / 360.0 )) / (math.pi / 180.0)
 
     my = my * (2 * math.pi * 6378137 / 2.0) / 180.0
     return mx, my
@@ -104,73 +108,177 @@ def metric_lonlat(xmx, ymy):
     xlat = 180 / math.pi * (2 * math.atan( math.exp( lat * math.pi / 180.0)) - math.pi / 2.0)
     return xlon, xlat
 
-try:
-    os.mkdir(folder)
-except:
-    pass
-
-if os.path.isfile(input_ts_file):
-    inputfiles = [input_ts_file]
-if os.path.isdir(input_ts_file):
-    inputfiles = glob.glob(input_ts_file + os.path.sep + '*.ts')
-   
-   
-for input_ts_file in inputfiles:
-    device = "A"
-    print (input_ts_file)
-
-    video = cv2.VideoCapture(input_ts_file)
-    fps = video.get(cv2.CAP_PROP_FPS)
-    length = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-    print ("FPS : {0}; LEN: {1}".format(fps,length))
-    
-    interval = int(args.sampling_interval*fps)
-    if interval == 0:
-        interval = 1
+def detect_file_type(input_file):
+    device = "X"
     make = "unknown"
     model = "unknown"
+    if input_file.lower().endswith(".ts"):
+        with open(input_file, "rb") as f:
+            device = "A"
+            input_packet = f.read(188) #First packet, try to autodetect
+            if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "V":
+                device = "V"
+                make = "Viofo"
+                model = "A119 V3"
+                
+            if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "B":
+                device = "B"
+                make = "Blueskysea"
+                model = "B4K"
+               
+            while device == "A":
+                currentdata = {}
+                input_packet = f.read(188)
+                if not input_packet:
+                    break
+                
+                #Autodetect camera type
+                if device == 'A' and input_packet.startswith(bytes("\x47\x03\x00", encoding="raw_unicode_escape")):
+                    bs = list(input_packet)
+                    active = chr(bs[156])
+                    lathem = chr(bs[157])
+                    lonhem = chr(bs[158])
+                    if lathem in "NS" and lonhem in "EW":
+                        device = "B"
+                        make = "Blueskysea"
+                        model = "B4K"
+                        print ("Autodetected as Blueskysea B4K")
+                        break
+                    
+                if device == 'A' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
+                    bs = list(input_packet)
+                    active = chr(bs[34])
+                    lathem = chr(bs[35])
+                    lonhem = chr(bs[36])            
+                    if lathem in "NS" and lonhem in "EW":
+                        device = "V"
+                        print ("Autodetected as Viofo A119 V3")
+                        make = "Viofo"
+                        model = "A119 V3"
+                        break
+    if input_file.lower().endswith(".mp4"): #Guess which MP4 method is used: Novatek, Subtitle, NMEA
+        device = "N"
+        make = "Novatek"
+        model = "unknown"
+        with open(input_file, "rb") as fx:
+            if True:
+                fx.seek(0, io.SEEK_END)
+                eof = fx.tell()
+                fx.seek(0)
+                lines = []
+                while fx.tell() < eof:
+                    try:
+                        box = Box.parse_stream(fx)
+                    except:
+                        pass
+                    #print (box.type.decode("utf-8"))
+                    if box.type.decode("utf-8") == "free":
+                        length = len(box.data)
+                        offset = 0
+                        while offset < length:
+                            inp = Box.parse(box.data[offset:])
+                            #print (inp.type.decode("utf-8"))
+                            if inp.type.decode("utf-8") == "gps": #NMEA-based
+                                lines = inp.data
+                                for line in lines.splitlines():
+                                    m = str(line).lstrip("[]0123456789")
+                                    if "$GPGGA" in m:
+                                        device = "N"
+                                        make = "NMEA-based video"
+                                        model = "unknown"
+                                        break
+                            offset += inp.end
+                    if box.type.decode("utf-8") == "gps": #has Novatek-specific stuff
+                        fx.seek(0)
+                        largeelem = fx.read()
+                        startbytes = [m.start() for m in re.finditer(b'freeGPS', largeelem)]
+                        del largeelem
+                        if len(startbytes)>0:
+                            make = "Novatek"
+                            model = "MP4"
+                            device = "T"
+                            break
+                    if box.type.decode("utf-8") == "moov":
+                        try:
+                            length = len(box.data)
+                        except:
+                            length = 0
+                        offset = 0
+                        while offset < length:
+                            inp = Box.parse(box.data[offset:])
+                            #print (inp.type.decode("utf-8"))
+                            if inp.type.decode("utf-8") == "gps": #NMEA-based
+                                lines = inp.data
+                                print (len(inp.data))
+                                for line in lines.splitlines():
+                                    m = str(line).lstrip("[]0123456789")
+                                    if "$GPGGA" in m:
+                                        device = "N"
+                                        make = "NMEA-based video"
+                                        model = "unknown"
+                                        #break
+                            offset += inp.end
+            else:
+                pass
+    return device,make,model
+    
+def get_gps_data_nt (input_ts_file, device):
+    packetno = 0
+    locdata = {}
+    with open(input_ts_file, "rb") as f:
+        largeelem = f.read()
+        startbytes = [m.start() for m in re.finditer(b'freeGPS', largeelem)]
+        for startbyte in startbytes:
+            currentdata = {}
+            input_packet = largeelem[startbyte+2:startbyte+188]
+            bs = list(input_packet)
+            hour = int.from_bytes(input_packet[10:14], byteorder='little')
+            minute = int.from_bytes(input_packet[14:18], byteorder='little')
+            second = int.from_bytes(input_packet[18:22], byteorder='little')
+            year = int.from_bytes(input_packet[22:26], byteorder='little')
+            month = int.from_bytes(input_packet[26:30], byteorder='little')
+            day = int.from_bytes(input_packet[30:34], byteorder='little')
+            active = chr(bs[34])
+            lathem = chr(bs[35])
+            lonhem = chr(bs[36])
+            lat = fix_coordinates(lathem,struct.unpack('<f', input_packet[38:42]))
+            lon = fix_coordinates(lonhem,struct.unpack('<f', input_packet[42:46]))
+            speed_knots, = struct.unpack('<f', input_packet[46:50])
+            speed = speed_knots * 1.6 / 3.6
+            bearing, = struct.unpack('<f', input_packet[50:54])
+            currentdata["ts"] = datetime(year=2000+year, month=month, day=day, hour=hour, minute=minute, second=second).replace(tzinfo=timezone.utc).timestamp()
+            currentdata["lat"] = lat
+            currentdata["latR"] = lathem
+            currentdata["lon"] = lon
+            currentdata["lonR"] = lonhem
+            currentdata["bearing"] = bearing
+            currentdata["speed"] = speed
+            currentdata["mx"],currentdata["my"] = lonlat_metric(lon,lat)
+            currentdata["metric"] = 0
+            currentdata["prevdist"] = 0
+            if active == "A":
+                locdata[packetno] = currentdata
+            packetno += 1
+            #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
+        
+            del currentdata
+    del largeelem
+    return locdata
+        
+    
+def get_gps_data_ts (input_ts_file, device):
     packetno = 0
     locdata = {}
     prevpacket = None
     with open(input_ts_file, "rb") as f:
         input_packet = f.read(188) #First packet, try to autodetect
-        if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "V":
-            device = "V"
-            print ("Viofo A119 V3")
-            make = "Viofo"
-            model = "A119 V3"   
-        if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "B":
-            device = "B"
-            make = "Blueskysea"
-            model = "B4K"
-            print ("Blueskysea B4K")    
+
         while True:
             currentdata = {}
             input_packet = f.read(188)
             if not input_packet:
                 break
-            #Autodetect camera type
-            if device == 'A' and input_packet.startswith(bytes("\x47\x03\x00", encoding="raw_unicode_escape")):
-                bs = list(input_packet)
-                active = chr(bs[156])
-                lathem = chr(bs[157])
-                lonhem = chr(bs[158])
-                if lathem in "NS" and lonhem in "EW":
-                    device = "B"
-                    make = "Blueskysea"
-                    model = "B4K"
-                    print ("Autodetected as Blueskysea B4K")
-                
-            if device == 'A' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
-                bs = list(input_packet)
-                active = chr(bs[34])
-                lathem = chr(bs[35])
-                lonhem = chr(bs[36])            
-                if lathem in "NS" and lonhem in "EW":
-                    device = "V"
-                    print ("Autodetected as Viofo A119 V3")
-                    make = "Viofo"
-                    model = "A119 V3"              
+         
             if device == 'B' and prevpacket and input_packet.startswith(bytes("\x47\x03\x00", encoding="raw_unicode_escape")):
                 bs = list(input_packet)
                 hour = int.from_bytes(prevpacket[174:178], byteorder='little')
@@ -233,6 +341,43 @@ for input_ts_file in inputfiles:
                 #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
             prevpacket = input_packet
             del currentdata
+    return locdata
+
+try:
+    os.mkdir(folder)
+except:
+    pass
+
+if os.path.isfile(input_ts_file):
+    inputfiles = [input_ts_file]
+if os.path.isdir(input_ts_file):
+    inputfiles = glob.glob(input_ts_file + os.path.sep + '*.ts')
+    inputfiles.extend(glob.glob(input_ts_file + os.path.sep + '*.mp4'))
+   
+   
+for input_ts_file in inputfiles:
+    
+    print (input_ts_file)
+    device,make,model = detect_file_type(input_ts_file)
+    print (make,model)
+
+    video = cv2.VideoCapture(input_ts_file)
+    fps = video.get(cv2.CAP_PROP_FPS)
+    length = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+    print ("FPS : {0}; LEN: {1}".format(fps,length))
+    
+    interval = int(args.sampling_interval*fps)
+    if interval == 0:
+        interval = 1
+    locdata = {}
+    if device in "BV":
+        locdata = get_gps_data_ts(input_ts_file, device)
+    if device in "T":
+        locdata = get_gps_data_nt(input_ts_file, device)
+    if device in "M":
+        locdata = get_gps_data_mp4(input_ts_file, device)
+
+
     print ("GPS data analysis ended, no of points ", len(locdata))
     
     ###Logging
@@ -405,9 +550,12 @@ for input_ts_file in inputfiles:
             else:
                 framecount += int(fps*args.sampling_interval)
             #print('Frame: ', framecount)
-            with suppress_stdout_stderr(): #Just to keep the console clear from OpenCV warning messages
+            if args.suppress_cv2_warnings == 1:
+                with suppress_stdout_stderr(): #Just to keep the console clear from OpenCV warning messages
+                    video.set(1,framecount)
+                success,image = video.read()
+            else:
                 video.set(1,framecount)
-            success,image = video.read()
         video.release()
         try:
             os.unlink("tmp.jpg")
