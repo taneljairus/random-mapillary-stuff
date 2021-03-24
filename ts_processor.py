@@ -556,6 +556,7 @@ for input_ts_file in inputfiles:
                 success,image = video.read()
             else:
                 video.set(1,framecount)
+                success,image = video.read()
         video.release()
         try:
             os.unlink("tmp.jpg")
