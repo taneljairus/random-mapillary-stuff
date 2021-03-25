@@ -188,7 +188,7 @@ def detect_file_type(input_file):
                                         model = "unknown"
                                         break
                             offset += inp.end
-                    if box.type.decode("utf-8") == "gps": #has Novatek-specific stuff
+                    if box.type.decode("utf-8") == "moov": #has Novatek-specific stuff
                         fx.seek(0)
                         largeelem = fx.read()
                         startbytes = [m.start() for m in re.finditer(b'freeGPS', largeelem)]
