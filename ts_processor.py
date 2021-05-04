@@ -5,6 +5,8 @@ import struct
 import sys
 import cv2
 from exif import Image, DATETIME_STR_FORMAT
+import piexif
+from fractions import Fraction
 from datetime import datetime,timezone
 import argparse
 import math
@@ -26,13 +28,15 @@ parser.add_argument('--min_coverage', default = '90', type=int) #percentage - ho
 parser.add_argument('--min_points', default = '5', type=int) #how many points to allow video extraction
 parser.add_argument('--metric_distance', default = '0', type=int) #distance between images, overrides sampling_interval. 
 parser.add_argument('--csv', default = '0', type=int) #create csv from coordinates before and after interpolation.
-parser.add_argument('--suppress_cv2_warnings', default = '1', type=int) #If disabled, will show lot of harmless warnings in console. Known to cause issues on Windows.
+parser.add_argument('--suppress_cv2_warnings', default = '0', type=int) #If disabled, will show lot of harmless warnings in console. Known to cause issues on Windows.
 parser.add_argument('--device_override', default = '', type=str) #force treatment as specific device, B for B4k, V for Viofo
 parser.add_argument('--mask', type=str) #masking image, must be same dimensionally as video
 parser.add_argument('--crop_left', default = '0', type=int) #number of pixels to crop from left
 parser.add_argument('--crop_right', default = '0', type=int) #number of pixels to crop from right
 parser.add_argument('--crop_top', default = '0', type=int) #number of pixels to crop from top
 parser.add_argument('--crop_bottom', default = '0', type=int) #number of pixels to crop from bottom
+parser.add_argument('--make', type=str) #set camera make to be written in EXIF
+parser.add_argument('--model', type=str) #set camera model to be written in EXIF
 args = parser.parse_args()
 print(args)
 input_ts_file = args.input
@@ -70,6 +74,60 @@ class suppress_stdout_stderr(object): #from here: https://stackoverflow.com/ques
         # Close all file descriptors
         for fd in self.null_fds + self.save_fds:
             os.close(fd)
+
+def to_deg(value, loc):  #From here: https://gist.github.com/c060604
+    """convert decimal coordinates into degrees, munutes and seconds tuple
+    Keyword arguments: value is float gps-value, loc is direction list ["S", "N"] or ["W", "E"]
+    return: tuple like (25, 13, 48.343 ,'N')
+    """
+    if value < 0:
+        loc_value = loc[0]
+    elif value > 0:
+        loc_value = loc[1]
+    else:
+        loc_value = ""
+    abs_value = abs(value)
+    deg =  int(abs_value)
+    t1 = (abs_value-deg)*60
+    min = int(t1)
+    sec = round((t1 - min)* 60, 5)
+    return (deg, min, sec, loc_value)
+
+
+def change_to_rational(number):
+    """convert a number to rantional
+    Keyword arguments: number
+    return: tuple like (1, 2), (numerator, denominator)
+    """
+    f = Fraction(str(number))
+    return (f.numerator, f.denominator)
+
+
+def set_gps_location(file_name, lat, lng):
+    """Adds GPS position as EXIF metadata
+    Keyword arguments:
+    file_name -- image file
+    lat -- latitude (as float)
+    lng -- longitude (as float)
+    """
+    lat_deg = to_deg(lat, ["S", "N"])
+    lng_deg = to_deg(lng, ["W", "E"])
+
+    exiv_lat = (change_to_rational(lat_deg[0]), change_to_rational(lat_deg[1]), change_to_rational(lat_deg[2]))
+    exiv_lng = (change_to_rational(lng_deg[0]), change_to_rational(lng_deg[1]), change_to_rational(lng_deg[2]))
+
+    gps_ifd = {
+        piexif.GPSIFD.GPSVersionID: (2, 0, 0, 0),
+        piexif.GPSIFD.GPSLatitudeRef: lat_deg[3],
+        piexif.GPSIFD.GPSLatitude: exiv_lat,
+        piexif.GPSIFD.GPSLongitudeRef: lng_deg[3],
+        piexif.GPSIFD.GPSLongitude: exiv_lng,
+    }
+
+    exif_dict = {"GPS": gps_ifd}
+    exif_bytes = piexif.dump(exif_dict)
+    piexif.insert(exif_bytes, file_name)
+
 
 def fix_coordinates(hemisphere,coordinate_input): #From here: https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
     coordinate, = coordinate_input
@@ -157,10 +215,8 @@ def detect_file_type(input_file):
                         model = "A119 V3"
                         break
     if input_file.lower().endswith(".mp4"): #Guess which MP4 method is used: Novatek, Subtitle, NMEA
-        device = "N"
-        make = "Novatek"
-        model = "unknown"
         with open(input_file, "rb") as fx:
+            
             if True:
                 fx.seek(0, io.SEEK_END)
                 eof = fx.tell()
@@ -198,6 +254,7 @@ def detect_file_type(input_file):
                             model = "MP4"
                             device = "T"
                             break
+                        
                     if box.type.decode("utf-8") == "moov":
                         try:
                             length = len(box.data)
@@ -220,6 +277,16 @@ def detect_file_type(input_file):
                             offset += inp.end
             else:
                 pass
+            if device == "X":
+                fx.seek(0)
+                largeelem = fx.read()
+                startbytes = [m.start() for m in re.finditer(b'\x00\x14\x50\x4E\x44\x4D\x00\x00\x00\x00', largeelem)]
+                del largeelem
+                if len(startbytes)>0:
+                    make = "Garmin"
+                    model = "unknown"
+                    device = "G"
+        
     return device,make,model
     
 def get_gps_data_nt (input_ts_file, device):
@@ -263,8 +330,105 @@ def get_gps_data_nt (input_ts_file, device):
         
             del currentdata
     del largeelem
-    return locdata
+    return locdata, packetno 
+
+def get_gps_data_garmin (input_ts_file, device):
+    packetno = 0
+    locdata = {}
+    with open(input_ts_file, "rb") as f:
+        largeelem = f.read()
+        startbytes = [m.start() for m in re.finditer(b'\x00\x14\x50\x4E\x44\x4D\x00\x00\x00\x00', largeelem)]
+        for startbyte in startbytes:
+            currentdata = {}
+            input_packet = largeelem[startbyte:startbyte+56]
+            bs = list(input_packet)
+            active = 0
+            lathem = 0
+            lonhem = 0
+            lat = int.from_bytes(input_packet[14:18], byteorder='big') / 11930464.711111112
+            lon = int.from_bytes(input_packet[18:22], byteorder='big') / 11930464.711111112
+            speed_knots = float(int.from_bytes(input_packet[10:11], byteorder='big'))
+            speed = speed_knots * 1.6 / 3.6
+            bearing = 0 #struct.unpack('<f', input_packet[50:54])
+            currentdata["ts"] = 0 #datetime(year=2000+year, month=month, day=day, hour=hour, minute=minute, second=second).replace(tzinfo=timezone.utc).timestamp()
+            currentdata["lat"] = lat
+            currentdata["latR"] = lathem
+            currentdata["lon"] = lon
+            currentdata["lonR"] = lonhem
+            currentdata["bearing"] = bearing
+            currentdata["speed"] = speed
+            currentdata["mx"],currentdata["my"] = lonlat_metric(lon,lat)
+            currentdata["metric"] = 0
+            currentdata["prevdist"] = 0
+            locdata[packetno] = currentdata
+            packetno += 1
+            #print (0,active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
         
+            del currentdata
+    del largeelem
+    return locdata, packetno 
+
+
+def get_gps_data_nmea (input_file, device):
+    packetno = 0
+    locdata = {}
+    with open(input_file, "rb") as fx:
+        if True:
+            fx.seek(0, io.SEEK_END)
+            eof = fx.tell()
+            fx.seek(0)
+            prevts = 0
+            lines = []
+            while fx.tell() < eof:
+                try:
+                    box = Box.parse_stream(fx)
+                except:
+                    pass
+                if box.type.decode("utf-8") == "free":
+                    try:
+                        length = len(box.data)
+                    except:
+                        length = 0
+                    offset = 0
+                    while offset < length:
+                        inp = Box.parse(box.data[offset:])
+                        #print (inp.type.decode("utf-8"))
+                        if inp.type.decode("utf-8") == "gps": #NMEA-based
+                            
+                            lines = inp.data
+                            
+                            for line in lines.splitlines():
+                                m = str(line)
+                                if "$GPRMC" in m:
+                                    currentdata = {}
+                                    currentdata["ts"] = int(m[3:13])
+                                    
+                                    currentdata["lat"] = float(m.split(",")[3][0:2]) + float(m.split(",")[3][2:]) / 60
+                                    currentdata["latR"] = m.split(",")[4]
+                                    if currentdata["latR"] == "S":
+                                        currentdata["lat"] = - currentdata["lat"]
+                                    
+                                    currentdata["lon"] = float(m.split(",")[5][0:3]) + float(m.split(",")[5][3:]) / 60
+                                    currentdata["lonR"] = m.split(",")[6]
+                                    if currentdata["lonR"] == "N":
+                                        currentdata["lon"] = - currentdata["lon"]
+                                    active = (m.split(",")[2])
+                                    nts = currentdata["ts"]
+                                    
+                                    currentdata["bearing"] = float(m.split(",")[9])
+                                    currentdata["speed"] = float(m.split(",")[8])*1.6/3.6
+                                    currentdata["mx"],currentdata["my"] = lonlat_metric(currentdata["lon"],currentdata["lat"])
+                                    currentdata["metric"] = 0
+                                    currentdata["prevdist"] = 0
+                                    if active == "A" and nts > prevts:
+                                        locdata[packetno] = currentdata
+                                        prevts = nts
+                                        packetno += 1
+                                    
+                                    del currentdata
+                        offset += inp.end
+    return locdata, packetno 
+
     
 def get_gps_data_ts (input_ts_file, device):
     packetno = 0
@@ -341,7 +505,7 @@ def get_gps_data_ts (input_ts_file, device):
                 #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
             prevpacket = input_packet
             del currentdata
-    return locdata
+    return locdata, packetno 
 
 try:
     os.mkdir(folder)
@@ -359,7 +523,7 @@ for input_ts_file in inputfiles:
     
     print (input_ts_file)
     device,make,model = detect_file_type(input_ts_file)
-    print (make,model)
+    print (make,model,device)
 
     video = cv2.VideoCapture(input_ts_file)
     fps = video.get(cv2.CAP_PROP_FPS)
@@ -370,16 +534,20 @@ for input_ts_file in inputfiles:
     if interval == 0:
         interval = 1
     locdata = {}
+    packetno = 0
     if device in "BV":
-        locdata = get_gps_data_ts(input_ts_file, device)
+        locdata,packetno = get_gps_data_ts(input_ts_file, device)
     if device in "T":
-        locdata = get_gps_data_nt(input_ts_file, device)
-    if device in "M":
-        locdata = get_gps_data_mp4(input_ts_file, device)
-
+        locdata,packetno = get_gps_data_nt(input_ts_file, device)
+    if device in "N":
+        locdata,packetno = get_gps_data_nmea(input_ts_file, device)
+    if device in "G":
+        locdata,packetno = get_gps_data_garmin(input_ts_file, device)
 
     print ("GPS data analysis ended, no of points ", len(locdata))
-    
+    if packetno > 0:
+        print ("Frames per point: ", length/packetno)
+        fps = length/packetno
     ###Logging
     if args.csv == 1:
         with open(input_ts_file.split(os.path.sep)[-1].replace(".ts","_")+"pre_interp.csv", "w") as xf:
@@ -484,6 +652,10 @@ for input_ts_file in inputfiles:
         errormessage = 0
         count = 0
         meters = 0
+        if args.make:
+            make = args.make
+        if args.model:
+            model = args.model
         success,image = video.read()
         while success:
 
@@ -507,19 +679,24 @@ for input_ts_file in inputfiles:
                             new_bear -= 360
                         lonref, lon2 = to_gps_latlon(new_lon, ('E', 'W'))
                         latref, lat2 = to_gps_latlon(new_lat, ('N', 'S'))
+                        #print (latref,lat2,new_lat)
                         if args.mask:
                             image = cv2.bitwise_and(image,image,mask = mask)
                         if args.crop_top + args.crop_bottom + args.crop_left + args.crop_right > 0:
                             height, width, channels = image.shape
                             image = image[args.crop_top : height - args.crop_bottom,args.crop_left : width - args.crop_right]
                         cv2.imwrite("tmp.jpg", image)
+                        
+                        
+                        
+    
                         e_image = Image("tmp.jpg")
-                        e_image.gps_latitude = lat2
-                        e_image.gps_latitude_ref = latref
-                        e_image.gps_longitude  = lon2
-                        e_image.gps_longitude_ref = lonref
-                        e_image.gps_img_direction = new_bear
-                        e_image.gps_dest_bearing = new_bear
+                        #e_image.gps_latitude = lat2
+                        #e_image.gps_latitude_ref = latref
+                        #e_image.gps_longitude  = lon2
+                        #e_image.gps_longitude_ref = lonref
+                        #e_image.gps_img_direction = new_bear
+                        #e_image.gps_dest_bearing = new_bear
                         e_image.make = make
                         e_image.model = model
                         datetime_taken = datetime.fromtimestamp(new_ts+args.timezone*3600)
@@ -527,6 +704,7 @@ for input_ts_file in inputfiles:
                         
                         with open(folder+os.path.sep+input_ts_file.split(os.path.sep)[-1].replace(".ts","_") + "_"+"%06d" % count + ".jpg", 'wb') as new_image_file:
                             new_image_file.write(e_image.get_file())
+                        set_gps_location(folder+os.path.sep+input_ts_file.split(os.path.sep)[-1].replace(".ts","_") + "_"+"%06d" % count + ".jpg", new_lat, new_lon)
                         #print('Frame: ', framecount)
                         count += 1
                 else:
@@ -553,7 +731,7 @@ for input_ts_file in inputfiles:
             if args.suppress_cv2_warnings == 1:
                 with suppress_stdout_stderr(): #Just to keep the console clear from OpenCV warning messages
                     video.set(1,framecount)
-                success,image = video.read()
+                    success,image = video.read()
             else:
                 video.set(1,framecount)
                 success,image = video.read()
