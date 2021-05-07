@@ -4,8 +4,8 @@
 import struct
 import sys
 import cv2
-from exif import Image, DATETIME_STR_FORMAT
 import piexif
+from exif import Image,DATETIME_STR_FORMAT
 from fractions import Fraction
 from datetime import datetime,timezone
 import argparse
@@ -99,11 +99,11 @@ def change_to_rational(number):
     Keyword arguments: number
     return: tuple like (1, 2), (numerator, denominator)
     """
-    f = Fraction(str(number))
+    f = Fraction(str(number)).limit_denominator()
     return (f.numerator, f.denominator)
 
 
-def set_gps_location(file_name, lat, lng):
+def set_gps_location(file_name, lat, lng, bear, make, model, datetm):
     """Adds GPS position as EXIF metadata
     Keyword arguments:
     file_name -- image file
@@ -115,6 +115,7 @@ def set_gps_location(file_name, lat, lng):
 
     exiv_lat = (change_to_rational(lat_deg[0]), change_to_rational(lat_deg[1]), change_to_rational(lat_deg[2]))
     exiv_lng = (change_to_rational(lng_deg[0]), change_to_rational(lng_deg[1]), change_to_rational(lng_deg[2]))
+    nbear = (change_to_rational(bear))
 
     gps_ifd = {
         piexif.GPSIFD.GPSVersionID: (2, 0, 0, 0),
@@ -122,9 +123,20 @@ def set_gps_location(file_name, lat, lng):
         piexif.GPSIFD.GPSLatitude: exiv_lat,
         piexif.GPSIFD.GPSLongitudeRef: lng_deg[3],
         piexif.GPSIFD.GPSLongitude: exiv_lng,
+        piexif.GPSIFD.GPSImgDirection: nbear,    
     }
 
-    exif_dict = {"GPS": gps_ifd}
+    zeroth_ifd = {
+        piexif.ImageIFD.Make: make,
+        piexif.ImageIFD.Model: model,        
+    }
+
+    exif_ifd = {
+        piexif.ExifIFD.DateTimeOriginal: datetm,
+    }
+
+
+    exif_dict = {"0th":zeroth_ifd,"Exif":exif_ifd,"GPS": gps_ifd}
     exif_bytes = piexif.dump(exif_dict)
     piexif.insert(exif_bytes, file_name)
 
@@ -697,14 +709,14 @@ for input_ts_file in inputfiles:
                         #e_image.gps_longitude_ref = lonref
                         #e_image.gps_img_direction = new_bear
                         #e_image.gps_dest_bearing = new_bear
-                        e_image.make = make
-                        e_image.model = model
+                        #e_image.make = make
+                        #e_image.model = model
                         datetime_taken = datetime.fromtimestamp(new_ts+args.timezone*3600)
-                        e_image.datetime_original = datetime_taken.strftime(DATETIME_STR_FORMAT)
+                        datetime_original = datetime_taken.strftime(DATETIME_STR_FORMAT)
                         
                         with open(folder+os.path.sep+input_ts_file.split(os.path.sep)[-1].replace(".ts","_") + "_"+"%06d" % count + ".jpg", 'wb') as new_image_file:
                             new_image_file.write(e_image.get_file())
-                        set_gps_location(folder+os.path.sep+input_ts_file.split(os.path.sep)[-1].replace(".ts","_") + "_"+"%06d" % count + ".jpg", new_lat, new_lon)
+                        set_gps_location(folder+os.path.sep+input_ts_file.split(os.path.sep)[-1].replace(".ts","_") + "_"+"%06d" % count + ".jpg", new_lat, new_lon, new_bear, make, model, datetime_original)
                         #print('Frame: ', framecount)
                         count += 1
                 else:
