@@ -326,6 +326,9 @@ def get_gps_data_nt (input_ts_file, device):
         for startbyte in startbytes:
             currentdata = {}
             input_packet = largeelem[startbyte+2:startbyte+188]
+            if int.from_bytes(input_packet[10:14], byteorder='little') == 0:
+                # Viofo A119S seems to put the data somewhere else...
+                input_packet = input_packet[32:]
             bs = list(input_packet)
             hour = int.from_bytes(input_packet[10:14], byteorder='little')
             minute = int.from_bytes(input_packet[14:18], byteorder='little')
