@@ -191,6 +191,11 @@ def detect_file_type(input_file):
                 make = "Viofo"
                 model = "A119 V3"
                 
+            if bytes("\xB0\x0D\x30\x34\xC3", encoding="raw_unicode_escape") in input_packet[20:40] or args.device_override == "S":
+                device = "S"
+                make = "Viofo"
+                model = "A119S"
+
             if bytes("\x40\x1F\x4E\x54\x39", encoding="raw_unicode_escape") in input_packet[4:20] or args.device_override == "B":
                 device = "B"
                 make = "Blueskysea"
@@ -226,6 +231,17 @@ def detect_file_type(input_file):
                         make = "Viofo"
                         model = "A119 V3"
                         break
+                    bs = list(input_packet[-54:])
+                    active = chr(bs[34])
+                    lathem = chr(bs[35])
+                    lonhem = chr(bs[36])
+                    if lathem in "NS" and lonhem in "EW":
+                        device = "S"
+                        print ("Autodetected as Viofo A119S")
+                        make = "Viofo"
+                        model = "A119S"
+                        break
+
     if input_file.lower().endswith(".mp4"): #Guess which MP4 method is used: Novatek, Subtitle, NMEA
         with open(input_file, "rb") as fx:
             
@@ -485,7 +501,9 @@ def get_gps_data_ts (input_ts_file, device):
                     locdata[packetno] = currentdata
                 packetno += 1
                 #print ('20{0:02}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}'.format(year,month,day,hour,minute,second),active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
-            if device == 'V' and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
+            if device in ('V', 'S') and input_packet.startswith(bytes("\x47\x43\x00", encoding="raw_unicode_escape")):
+                if device == 'S':
+                    input_packet = input_packet[-54:]
                 bs = list(input_packet)
                 hour = int.from_bytes(input_packet[10:14], byteorder='little')
                 minute = int.from_bytes(input_packet[14:18], byteorder='little')
@@ -547,7 +565,7 @@ for input_ts_file in inputfiles:
         interval = 1
     locdata = {}
     packetno = 0
-    if device in "BV":
+    if device in "BVS":
         locdata,packetno = get_gps_data_ts(input_ts_file, device)
     if device in "T":
         locdata,packetno = get_gps_data_nt(input_ts_file, device)
