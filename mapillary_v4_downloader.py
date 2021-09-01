@@ -23,13 +23,9 @@ ur_lat = 59.70013
 ur_lon = 25.10291
 llx,lly = deg2num (ll_lat, ll_lon, z)
 urx,ury = deg2num (ur_lat, ur_lon, z)
-#uncomment the one layer you wish to use
 
-#type="mly1_computed_public"
-type="mly_map_feature_point"
-#type="mly_map_feature_traffic_sign"
-#type="mly1_computed_public"
-#type="mly1_public"
+#remove the layers you don't want to use
+#description are in official docs: https://www.mapillary.com/developer/api-documentation/
 
 types = ["mly1_computed_public","mly_map_feature_point","mly_map_feature_traffic_sign","mly1_computed_public","mly1_public"]
 
