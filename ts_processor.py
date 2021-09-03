@@ -5,7 +5,8 @@ import struct
 import sys
 import cv2
 import piexif
-from exif import Image,DATETIME_STR_FORMAT
+from exif import Image
+from exif import DATETIME_STR_FORMAT
 from fractions import Fraction
 from datetime import datetime,timezone
 import argparse
@@ -24,6 +25,7 @@ parser.add_argument('--timeshift', default = '0', type=float) #time shift in sec
 parser.add_argument('--timezone', default = '0', type=float) #timezone difference in hours. Depends on video source, some provide GMT, others local
 parser.add_argument('--min_speed', default = '-1', type=float) #minimum speed in m/s to filter out stops
 parser.add_argument('--bearing_modifier', default = '0', type=float) #180 if rear camera
+parser.add_argument('--bearing_recalculate', default = '0', type=float) #should bearing be recalculated from trajectory
 parser.add_argument('--min_coverage', default = '90', type=int) #percentage - how much video must have GPS data in order to interpolate missing
 parser.add_argument('--min_points', default = '5', type=int) #how many points to allow video extraction
 parser.add_argument('--metric_distance', default = '0', type=int) #distance between images, overrides sampling_interval. 
@@ -74,6 +76,44 @@ class suppress_stdout_stderr(object): #from here: https://stackoverflow.com/ques
         # Close all file descriptors
         for fd in self.null_fds + self.save_fds:
             os.close(fd)
+
+def calculate_initial_compass_bearing(pointA, pointB): #from here: https://gist.github.com/jeromer/2005586
+    """
+    Calculates the bearing between two points.
+    The formulae used is the following:
+        θ = atan2(sin(Δlong).cos(lat2),
+                  cos(lat1).sin(lat2) − sin(lat1).cos(lat2).cos(Δlong))
+    :Parameters:
+      - `pointA: The tuple representing the latitude/longitude for the
+        first point. Latitude and longitude must be in decimal degrees
+      - `pointB: The tuple representing the latitude/longitude for the
+        second point. Latitude and longitude must be in decimal degrees
+    :Returns:
+      The bearing in degrees
+    :Returns Type:
+      float
+    """
+    if (type(pointA) != tuple) or (type(pointB) != tuple):
+        raise TypeError("Only tuples are supported as arguments")
+
+    lat1 = math.radians(pointA[0])
+    lat2 = math.radians(pointB[0])
+
+    diffLong = math.radians(pointB[1] - pointA[1])
+
+    x = math.sin(diffLong) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1)
+            * math.cos(lat2) * math.cos(diffLong))
+
+    initial_bearing = math.atan2(x, y)
+
+    # Now we have the initial bearing but math.atan2 return values
+    # from -180° to + 180° which is not what we want for a compass bearing
+    # The solution is to normalize the initial bearing as shown below
+    initial_bearing = math.degrees(initial_bearing)
+    compass_bearing = (initial_bearing + 360) % 360
+
+    return compass_bearing
 
 def to_deg(value, loc):  #From here: https://gist.github.com/c060604
     """convert decimal coordinates into degrees, munutes and seconds tuple
@@ -298,7 +338,16 @@ def detect_file_type(input_file):
                     make = "Garmin"
                     model = "unknown"
                     device = "G"
-        
+            if device == "X":
+                fx.seek(0)
+                largeelem = fx.read()
+                startbytes = [m.start() for m in re.finditer(b'GPGGA', largeelem)]
+                
+                del largeelem
+                if len(startbytes)>0:
+                    make = "NEXTBASE"
+                    model = "unknown"
+                    device = "NB"       
     return device,make,model
     
 def get_gps_data_nt (input_ts_file, device):
@@ -380,6 +429,62 @@ def get_gps_data_garmin (input_ts_file, device):
     del largeelem
     return locdata, packetno 
 
+def get_gps_data_nextbase (input_ts_file, device):
+    print (1)
+    packetno = 0
+    locdata = {}
+    prevts = -1
+    with open(input_ts_file, "rb") as f:
+        largeelem = f.read()
+        startbytes = [m.start() for m in re.finditer(b'GPRMC', largeelem)]
+        for startbyte in startbytes:
+            currentdata = {}
+            input_packet = largeelem[startbyte-1:startbyte+100]
+            m = str(input_packet)
+            #print (m)
+            if "$GPRMC" in m:
+                currentdata = {}
+                currentdata["ts"] = datetime.strptime(largeelem[startbyte-29:startbyte-15].decode("utf-8"), "%Y%m%d%H%M%S").timestamp()
+                try:
+                    currentdata["lat"] = float(m.split(",")[3][0:2]) + float(m.split(",")[3][2:]) / 60
+                    currentdata["latR"] = m.split(",")[4]
+                    if currentdata["latR"] == "S":
+                        currentdata["lat"] = - currentdata["lat"]
+                    
+                    currentdata["lon"] = float(m.split(",")[5][0:3]) + float(m.split(",")[5][3:]) / 60
+                    currentdata["lonR"] = m.split(",")[6]
+                    if currentdata["lonR"] == "N":
+                        currentdata["lon"] = - currentdata["lon"]
+                except:
+                    pass
+                try:
+                    currentdata["bearing"] = float(m.split(",")[9])
+                    currentdata["speed"] = float(m.split(",")[8])*1.6/3.6
+                    
+                except:
+                    currentdata["bearing"] = 0
+                    currentdata["speed"] = 0
+                active = (m.split(",")[2])
+                nts = currentdata["ts"]
+                
+                currentdata["metric"] = 0
+                currentdata["prevdist"] = 0
+                try:
+                    currentdata["mx"],currentdata["my"] = lonlat_metric(currentdata["lon"],currentdata["lat"])
+                except:
+                    pass
+
+                if active == "A" and nts > prevts:
+                    locdata[packetno] = currentdata
+                    prevts = nts
+                    packetno += 1
+                
+                
+            #print (0,active,lathem,lonhem,lat,lon,speed,bearing, sep=';')
+        
+            del currentdata
+    del largeelem
+    return locdata, packetno 
 
 def get_gps_data_nmea (input_file, device):
     packetno = 0
@@ -414,24 +519,36 @@ def get_gps_data_nmea (input_file, device):
                                 if "$GPRMC" in m:
                                     currentdata = {}
                                     currentdata["ts"] = int(m[3:13])
-                                    
-                                    currentdata["lat"] = float(m.split(",")[3][0:2]) + float(m.split(",")[3][2:]) / 60
-                                    currentdata["latR"] = m.split(",")[4]
-                                    if currentdata["latR"] == "S":
-                                        currentdata["lat"] = - currentdata["lat"]
-                                    
-                                    currentdata["lon"] = float(m.split(",")[5][0:3]) + float(m.split(",")[5][3:]) / 60
-                                    currentdata["lonR"] = m.split(",")[6]
-                                    if currentdata["lonR"] == "N":
-                                        currentdata["lon"] = - currentdata["lon"]
+                                    #print (m)
+                                    try:
+                                        currentdata["lat"] = float(m.split(",")[3][0:2]) + float(m.split(",")[3][2:]) / 60
+                                        currentdata["latR"] = m.split(",")[4]
+                                        if currentdata["latR"] == "S":
+                                            currentdata["lat"] = - currentdata["lat"]
+                                        
+                                        currentdata["lon"] = float(m.split(",")[5][0:3]) + float(m.split(",")[5][3:]) / 60
+                                        currentdata["lonR"] = m.split(",")[6]
+                                        if currentdata["lonR"] == "N":
+                                            currentdata["lon"] = - currentdata["lon"]
+                                    except:
+                                        pass
+                                    try:
+                                        currentdata["bearing"] = float(m.split(",")[9])
+                                        currentdata["speed"] = float(m.split(",")[8])*1.6/3.6
+                                        
+                                    except:
+                                        currentdata["bearing"] = 0
+                                        currentdata["speed"] = 0
                                     active = (m.split(",")[2])
                                     nts = currentdata["ts"]
                                     
-                                    currentdata["bearing"] = float(m.split(",")[9])
-                                    currentdata["speed"] = float(m.split(",")[8])*1.6/3.6
-                                    currentdata["mx"],currentdata["my"] = lonlat_metric(currentdata["lon"],currentdata["lat"])
                                     currentdata["metric"] = 0
                                     currentdata["prevdist"] = 0
+                                    try:
+                                        currentdata["mx"],currentdata["my"] = lonlat_metric(currentdata["lon"],currentdata["lat"])
+                                    except:
+                                        pass
+
                                     if active == "A" and nts > prevts:
                                         locdata[packetno] = currentdata
                                         prevts = nts
@@ -555,6 +672,8 @@ for input_ts_file in inputfiles:
         locdata,packetno = get_gps_data_nmea(input_ts_file, device)
     if device in "G":
         locdata,packetno = get_gps_data_garmin(input_ts_file, device)
+    if device in "NB":
+        locdata,packetno = get_gps_data_nextbase(input_ts_file, device)
 
     print ("GPS data analysis ended, no of points ", len(locdata))
     if packetno > 0:
@@ -606,7 +725,7 @@ for input_ts_file in inputfiles:
         while not i in locdata:
             i+=1  #extrapolate down
         
-        while i > -5:
+        while i > 3:
             if not i in locdata:
                 currentdata = {}
                 
@@ -623,9 +742,10 @@ for input_ts_file in inputfiles:
                 del currentdata
             i-=1
         i=0
+        
         while i in locdata:
             i+=1
-        while i < length / fps * 1.1:
+        while i < length / fps * 1.1 and len(locdata)>1:
             if not i in locdata:
                 currentdata = {}
                 
@@ -684,7 +804,10 @@ for input_ts_file in inputfiles:
                         new_ts = locdata[prev_dataframe]["ts"]+(locdata[(prev_dataframe+1)]["ts"]-locdata[prev_dataframe]["ts"])*current_position
                         new_lat = locdata[prev_dataframe]["lat"]+(locdata[(prev_dataframe+1)]["lat"]-locdata[prev_dataframe]["lat"])*current_position
                         new_lon = locdata[prev_dataframe]["lon"]+(locdata[(prev_dataframe+1)]["lon"]-locdata[prev_dataframe]["lon"])*current_position
-                        new_bear = args.bearing_modifier + locdata[prev_dataframe]["bearing"]+(locdata[(prev_dataframe+1)]["bearing"]-locdata[prev_dataframe]["bearing"])*current_position
+                        if args.bearing_recalculate == 1:
+                            new_bear = args.bearing_modifier + calculate_initial_compass_bearing((locdata[prev_dataframe]["lat"],locdata[prev_dataframe]["lon"]),(locdata[(prev_dataframe+1)]["lat"],locdata[(prev_dataframe+1)]["lon"]))
+                        else:
+                            new_bear = args.bearing_modifier + locdata[prev_dataframe]["bearing"]+(locdata[(prev_dataframe+1)]["bearing"]-locdata[prev_dataframe]["bearing"])*current_position
                         while new_bear < 0:
                             new_bear += 360
                         while new_bear > 360:
