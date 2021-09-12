@@ -12,22 +12,22 @@ def deg2num(lat_deg, lon_deg, zoom):
   return (xtile, ytile)
 
 MAP_ACCESS_TOKEN = "MLY|1234567899" ##Change this
-outputfolder = "/tmp/mapillary"  ##Change this
+outputfolder = "E:/yield_folder/yield_traffic_sign.geojson"  ##Change this
 
 #set zoom levels and corner coordinates
 
 z = 14
-ll_lat = 59.46032 
-ll_lon = 24.47499
-ur_lat = 59.70013 
-ur_lon = 25.10291
+ll_lat = 49.6265 
+ll_lon = 28.9991
+ur_lat = 51.3965 
+ur_lon = 31.9874
 llx,lly = deg2num (ll_lat, ll_lon, z)
 urx,ury = deg2num (ur_lat, ur_lon, z)
 
 #remove the layers you don't want to use
 #description are in official docs: https://www.mapillary.com/developer/api-documentation/
 
-types = ["mly1_computed_public","mly_map_feature_point","mly_map_feature_traffic_sign","mly1_computed_public","mly1_public"]
+types = ["mly_map_feature_traffic_sign"]
 
 for type in types:
     output = {"type":"FeatureCollection","features":[]}
